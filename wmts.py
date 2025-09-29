@@ -16,12 +16,14 @@ def init_parser(parser):
         "--random-seed",
         type=int,
         default=1640,
+        env_var="LOCUST_RANDOM_SEED",
         help="Random seed used determine a random col and tile, this is important to prevent server/client caching. If No seed is set then 1640 will be the default value",
     )
     parser.add_argument(
         "--layer-name",
         type=str,
         default=None,
+        env_var="LOCUST_LAYER_NAME",
         help="Layer to be used for benchmarking. if not set, will default to service's first layer",
     )
 
@@ -29,12 +31,14 @@ def init_parser(parser):
         "--tile-matrix-set",
         type=str,
         default=None,
+        env_var="LOCUST_TILE_MATRIX_SET",
         help="Tilematrixset of layer to be used. In not set, if not set, will default to service's first layer",
     )
     parser.add_argument(
         "--tile-matrix",
         type=str,
         default=None,
+        env_var="LOCUST_TILE_MATRIX",
         help="Tilematrix of Tilematrixset to be used. In not set, if not set, will determine the median level of pyramid (Tilematrixset) and use it",
     )
 
@@ -57,7 +61,12 @@ class WMTSBenchmark(FastHttpUser):
         On start, fetch the WMtS capabilities to determine layers and tilematrixsets.
         /hwh/luchtfotorgb/wmts/v1_0/{layer_identifier}/{tile_matrix_set}/{tile_matrix}/{tile_col}/{tile_row}.jpeg"
         """
-        self.wmts = WebMapTileService(self.host)
+        try:
+            self.wmts = WebMapTileService(self.host)
+        except Exception as e:
+            logger.error(f"Failed to connect to WMTS service at {self.host}: {e}")
+            self.environment.runner.quit()
+            raise
 
         self.layers = list(self.wmts.contents.keys())
         ##### TO BE REFACTORED ####
@@ -178,7 +187,18 @@ class WMTSBenchmark(FastHttpUser):
         # url_path = f"{self.host}/{self.layer_name}/{self.tile_matrix_set}/{self.tile_matrix_value}/{tile_col}/{tile_row}.jpeg"
         url_path = f"{self.host}?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={self.layer_name}&STYLE=default&FORMAT={self.layer_mimetype}&TILEMATRIXSET={self.tile_matrix_set}&TILEMATRIX={self.tile_matrix_value}&TILEROW={tile_row}&TILECOL={tile_col}"
         # url_path=f"{self.host}?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=Interface_E2018&STYLE=AE-Interface_Estrutural_2018&FORMAT=image%2Fpng&TILEMATRIXSET=EPSG:3763&TILEMATRIX=PT-TM06:9&TILEROW={tile_row}&TILECOL={tile_col}"
-        response = self.client.get(url_path)
+
+        with self.client.get(url_path, catch_response=True, name="GetTile") as response:
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '').lower()
+                if content_type.startswith('image/'):
+                    response.success()
+                elif 'xml' in content_type and 'exception' in response.text.lower():
+                    response.failure(f"OGC Exception: {response.text[:200]}")
+                else:
+                    response.failure(f"Invalid content type: {content_type}")
+            else:
+                response.failure(f"HTTP {response.status_code}: {response.reason}")
 
 
 def random_number_generator(min_value, max_value, seed=None):
@@ -199,55 +219,9 @@ def random_number_generator(min_value, max_value, seed=None):
         yield random.randint(min_value, max_value)
 
 
-# Example running code snippet would be similar to your WMTS benchmark
+# Example running code for testing the WMTS benchmark
 if __name__ == "__main__":
-    # Initialize the environment and parser for Locust
-    import logging
-
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-    from locust import run_single_user
-    from locust.env import Environment
-
-    # Initialize the environment
-    env = Environment(user_classes=[WMTSBenchmark])
-    env.create_local_runner()
-
-    # Manually create an instance of your Locust user class
-
-    wmts_benchmark = WMTSBenchmark(env)
-    env.parsed_options = type("", (), {})()  # Create a simple class to hold options
-
-    # Uncomment the host on class (seems there is a bug on locutus to set the host)
-    # wmts_benchmark.host = "https://service.pdok.nl/hwh/luchtfotorgb/wmts/v1_0"  # Set the host explicitly
-    wmts_benchmark.host = "https://cartografia.dgterritorio.gov.pt/ortos2021/service"
-
-    # Simulate command line arguments
-    env.parsed_options.random_seed = 1234
-
-    # PDOK
-    # env.parsed_options.layer_name = "I_dont_exist"  #['Actueel_orthoHR', 'Actueel_ortho25', '2024_quickorthoHR', '2023_orthoHR', '2023_ortho25', '2022_orthoHR', '2022_ortho25', '2021_orthoHR', '2020_ortho25', '2019_ortho25', '2018_ortho25', '2017_ortho25', '2016_ortho25']
-    # env.parsed_options.layer_name = "2017_ortho25"
-    # env.parsed_options.tile_matrix_set= "test" ['EPSG:28992', 'EPSG:3857', 'EPSG:4258', 'EPSG:4326', 'EPSG:25831', 'EPSG:25832', 'OGC:1.0:GoogleMapsCompatible']
-    # env.parsed_options.tile_matrix_set = "OGC:1.0:GoogleMapsCompatible" # Most extreme case
-    # env.parsed_options.tile_matrix = "07"
-
-    # DGT
-    env.parsed_options.random_seed = 1234
-    # env.parsed_options.layer_name = "I_dont_exist"  #['Actueel_orthoHR', 'Actueel_ortho25', '2024_quickorthoHR', '2023_orthoHR', '2023_ortho25', '2022_orthoHR', '2022_ortho25', '2021_orthoHR', '2020_ortho25', '2019_ortho25', '2018_ortho25', '2017_ortho25', '2016_ortho25']
-    env.parsed_options.layer_name = "Ortos2021-RGB"
-    # env.parsed_options.tile_matrix_set= "test" ['EPSG:28992', 'EPSG:3857', 'EPSG:4258', 'EPSG:4326', 'EPSG:25831', 'EPSG:25832', 'OGC:1.0:GoogleMapsCompatible']
-    env.parsed_options.tile_matrix_set = "PTTM_06"  # Most extreme case
-    env.parsed_options.tile_matrix = "07"
-
-    wmts_benchmark.environment = env
-
-    # Directly call the on_start to use the setup (if any exception handling, do here)
-    try:
-        wmts_benchmark.on_start()
-    except Exception as e:
-        print("An error occurred during setup:", str(e))
-        exit()
-
-    # Assuming we are just testing the setup, you might not need to run any tasks, but if you do:
-    wmts_benchmark.load_tile()  # Directly run the task method
-    env.runner.quit()
+    print("WMTS Benchmark class - Use with locust command line tool:")
+    print("locust -f wmts.py --host https://example.com/wmts")
+    print("Available options: --layer-name, --tile-matrix-set, --tile-matrix, --random-seed")
+    print("Environment variables: LOCUST_LAYER_NAME, LOCUST_TILE_MATRIX_SET, etc.")

@@ -1,5 +1,6 @@
-"""Module with usefull classes and funcs
+"""Module with useful classes and funcs
 """
+import logging
 import requests
 from xml.etree import ElementTree as ET
 # Function to get feature count using GetFeature with resultType=hits

@@ -20,29 +20,28 @@ def init_parser(parser):
         "--random-seed",
         type=int,
         default=1640,
+        env_var="LOCUST_RANDOM_SEED",
         help="Random seed used to generate the bbox, this is important to prevent server/client caching. Usefull to replicate random bbox. If no seed then 1640 value will be used",
     )
     parser.add_argument(
         "--bbox-area",
         type=float,
         default=100.0,
+        env_var="LOCUST_BBOX_AREA",
         help="Bounding box area in square meters, depending on projection used. Defaults is 100km2 or 10x10km on bbox-ratio=1.0",
     )
     parser.add_argument(
         "--bbox-ratio",
         type=float,
         default=1.0,
+        env_var="LOCUST_BBOX_RATIO",
         help="Bounding box width/height ratio, better to keep it as 1.0 (square)",
     )
     parser.add_argument(
         "--layer-name",
         type=str,
+        env_var="LOCUST_LAYER_NAME",
         help="Layer to be used for benchmarking. if not set, will default to service's first layer",
-    )
-    parser.add_argument(
-        "--extra-payload",
-        type=str,
-        help="Extra parameters to be added to url request e.g 'api_key=4565'",
     )
 
 
@@ -64,14 +63,12 @@ class WMSBenchmark(FastHttpUser):
         """
         On start, fetch the WMS capabilities to determine layers and other parameters.
         """
-        extra_payload = self.environment.parsed_options.extra_payload
-        if extra_payload:
-            url_with_payload = f"{self.host}?{extra_payload}"
-            print(extra_payload)
-        else:
-            url_with_payload = f"{self.host}?"
-
-        self.wms = WebMapService(url_with_payload)
+        try:
+            self.wms = WebMapService(self.host)
+        except Exception as e:
+            logger.error(f"Failed to connect to WMS service at {self.host}: {e}")
+            self.environment.runner.quit()
+            raise
         
         self.layers = self.get_layers()
         self.layer_name = self.environment.parsed_options.layer_name
@@ -127,8 +124,8 @@ class WMSBenchmark(FastHttpUser):
         """
         # TODO: check if we get a real EPSG code
         # ['EPSG:4258', 'EPSG:3857', 'EPSG:25831', 'EPSG:25832', 'EPSG:28992', 'EPSG:4326']
-        epgs_code = self.layer.boundingBox[-1]
-        return epgs_code
+        epsg_code = self.layer.boundingBox[-1]
+        return epsg_code
 
     def get_layers(self):
         """
@@ -154,45 +151,26 @@ class WMSBenchmark(FastHttpUser):
 
         # Constructing the URL path #&srs={self.srs}
         url_path = f"{self.host}?service=WMS&version=1.3.0&request=GetMap&layers={self.layer_name}&styles=&bbox={bbox_str}&width=512&height=512&crs={self.crs}&format={self.layer_mimetype}"
-        if self.environment.parsed_options.extra_payload:
-            url_path=f"{url_path}&{self.environment.parsed_options.extra_payload}"         
-
 
         # Making the GET request to load the map
         logger.debug(f"URL for request: {url_path}")
-        response = self.client.get(url_path)
+
+        with self.client.get(url_path, catch_response=True, name="GetMap") as response:
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '').lower()
+                if content_type.startswith('image/'):
+                    response.success()
+                elif 'xml' in content_type and 'exception' in response.text.lower():
+                    response.failure(f"OGC Exception: {response.text[:200]}")
+                else:
+                    response.failure(f"Invalid content type: {content_type}")
+            else:
+                response.failure(f"HTTP {response.status_code}: {response.reason}")
 
 
-# Example running code snippet would be similar to your WMTS benchmark
+# Example running code for testing the WMS benchmark
 if __name__ == "__main__":
-    import logging
-
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-    from locust import run_single_user
-    from locust.env import Environment
-
-    # Initialize the environment
-    env = Environment(user_classes=[WMSBenchmark])
-    env.create_local_runner()
-
-    wms_benchmark = WMSBenchmark(env)
-    env.parsed_options = type("", (), {})()  # Create a simple class to hold options
-
-    # wms_benchmark.host = "https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0"
-    wms_benchmark.host = "https://ortos.dgterritorio.gov.pt/wms/ortoimagens2023"
-    env.parsed_options.random_seed = 72
-    env.parsed_options.bbox_area = 100  # square km (10km x 10km)
-    env.parsed_options.bbox_ratio = 1.0
-    env.parsed_options.layer_name = "Ortoimagens2023-RGB"
-
-    wms_benchmark.environment = env
-    # Directly call the on_start to use the setup (if any exception handling, do here)
-    try:
-        wms_benchmark.on_start()
-    except Exception as e:
-        print("An error occurred during setup:", str(e))
-        exit()
-
-    # Assuming we are just testing the setup, you might not need to run any tasks, but if you do:
-    wms_benchmark.load_map()  # Directly run the task method
-    env.runner.quit()
+    print("WMS Benchmark class - Use with locust command line tool:")
+    print("locust -f wms.py --host https://example.com/wms")
+    print("Available options: --layer-name, --bbox-area, --bbox-ratio, --random-seed")
+    print("Environment variables: LOCUST_LAYER_NAME, LOCUST_BBOX_AREA, etc.")

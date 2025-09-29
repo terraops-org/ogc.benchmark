@@ -14,8 +14,6 @@ from utils.random_bbox import generate_random_bbox_degrees
 # Set up logging for debug messages
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-
 
 @events.init_command_line_parser.add_listener
 def init_parser(parser):
@@ -23,18 +21,21 @@ def init_parser(parser):
         "--random-seed",
         type=int,
         default=1640,
+        env_var="LOCUST_RANDOM_SEED",
         help="Random seed used to generate the bbox, this is important to prevent server/client caching. Usefull to replicate random bbox. If no seed then 1640 value will be used",
     )
     parser.add_argument(
         "--bbox-area",
         type=float,
         default=100.0,
+        env_var="LOCUST_BBOX_AREA",
         help="Bounding box area in square meters, depending on projection used. Defaults is 100km2 or 10x10km on bbox-ratio=1.0",
     )
     parser.add_argument(
         "--bbox-ratio",
         type=float,
         default=1.0,
+        env_var="LOCUST_BBOX_RATIO",
         help="Bounding box width/height ratio, better to keep it as 1.0 (square)",
     )
 
@@ -42,6 +43,7 @@ def init_parser(parser):
         "--feature-name",
         type=str,
         default=None,
+        env_var="LOCUST_FEATURE_NAME",
         help="Feature name (layer) to be used for benchmarking, with namespace e.g: 'au:AU.AdministrativeUnits'. If not set, will default to service's first  Feature on GetCapabilities (layer)",
     )
 
@@ -53,7 +55,12 @@ class WFSBenchmark(FastHttpUser):
 
     def on_start(self):
         # Fetch WFS Capabilities to determine features and parameters
-        self.wfs20 = WebFeatureService(self.host, parse_remote_metadata=False, version="2.0.0")
+        try:
+            self.wfs20 = WebFeatureService(self.host, parse_remote_metadata=False, version="2.0.0")
+        except Exception as e:
+            logging.error(f"Failed to connect to WFS service at {self.host}: {e}")
+            self.environment.runner.quit()
+            raise
         self.feature_names = self.get_features()
         self.feature_name = self.environment.parsed_options.feature_name
         if self.feature_name:
@@ -92,38 +99,26 @@ class WFSBenchmark(FastHttpUser):
         bbox_str = ",".join(map(str, bbox))
         url_path = f"{self.host}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAME={self.feature_name}&BBOX={bbox_str}&COUNT=1000&crs={self.crs}"
         logging.debug(f"URL for request: {url_path}")
-        response = self.client.get(url_path)
+
+        with self.client.get(url_path, catch_response=True, name="GetFeature") as response:
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '').lower()
+                if 'xml' in content_type or 'gml' in content_type:
+                    if 'exception' in response.text.lower():
+                        response.failure(f"OGC Exception: {response.text[:200]}")
+                    else:
+                        response.success()
+                elif 'json' in content_type:
+                    response.success()
+                else:
+                    response.failure(f"Invalid content type: {content_type}")
+            else:
+                response.failure(f"HTTP {response.status_code}: {response.reason}")
 
 
-# Example running code snippet would be similar to your WMTS benchmark
+# Example running code for testing the WFS benchmark
 if __name__ == "__main__":
-    import logging
-
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-    from locust import run_single_user
-    from locust.env import Environment
-
-    # Initialize the environment
-    env = Environment(user_classes=[WFSBenchmark])
-    env.create_local_runner()
-
-    wfs_benchmark = WFSBenchmark(env)
-    env.parsed_options = type("", (), {})()  # Create a simple class to hold options
-
-    wfs_benchmark.host = "https://geo2.dgterritorio.gov.pt/geoserver/au/wfs"
-    env.parsed_options.random_seed = 72
-    env.parsed_options.bbox_area = 10000  # square km (100km x 100km)
-    env.parsed_options.bbox_ratio = 1.0
-    env.parsed_options.feature_name = "au:AU.AdministrativeUnits"
-
-    wfs_benchmark.environment = env
-    # Directly call the on_start to use the setup (if any exception handling, do here)
-    try:
-        wfs_benchmark.on_start()
-    except Exception as e:
-        print("An error occurred during setup:", str(e))
-        exit()
-
-    # Assuming we are just testing the setup, you might not need to run any tasks, but if you do:
-    wfs_benchmark.load_features()  # Directly run the task method
-    env.runner.quit()
+    print("WFS Benchmark class - Use with locust command line tool:")
+    print("locust -f wfs.py --host https://example.com/wfs")
+    print("Available options: --feature-name, --bbox-area, --bbox-ratio, --random-seed")
+    print("Environment variables: LOCUST_FEATURE_NAME, LOCUST_BBOX_AREA, etc.")
