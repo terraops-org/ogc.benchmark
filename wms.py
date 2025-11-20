@@ -10,7 +10,9 @@ from utils.random_bbox import generate_random_bbox
 
 import requests
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 # extend command line to allow a random-seed (for random bbox creation) and
 # argument for bbox area
@@ -69,7 +71,7 @@ class WMSBenchmark(FastHttpUser):
             logger.error(f"Failed to connect to WMS service at {self.host}: {e}")
             self.environment.runner.quit()
             raise
-        
+
         self.layers = self.get_layers()
         self.layer_name = self.environment.parsed_options.layer_name
         if self.layer_name:
@@ -82,9 +84,10 @@ class WMSBenchmark(FastHttpUser):
                 raise LayerNameArgError(error_message)
             else:
                 pass  # all good with layer name
-        else:  # user didnt defined layer
-            logger.info(f"No --layer-name argument, using first layer available in service")
-            self.layer_name = self.layers[0]  # we will only use the first layer
+        else:  # user didn't define layer - intelligently select best one
+            logger.info(f"No --layer-name argument, selecting best layer from service")
+            self.layer_name = self._select_best_layer()
+            logger.info(f"Auto-selected layer: '{self.layer_name}'")
 
         self.layer = self.wms.contents[self.layer_name]
 
@@ -136,6 +139,41 @@ class WMSBenchmark(FastHttpUser):
             layers.append(layer)
         return layers
 
+    def _select_best_layer(self):
+        """
+        Select the best layer for benchmarking when no layer is specified.
+        Prefers layers with projected coordinate systems (EPSG:3xxx, 2xxx, 32xxx)
+        over geographic (EPSG:4xxx) or web mercator (EPSG:3857).
+        Skips parent/group layers that may have overly broad extents.
+        """
+        preferred_layers = []
+        fallback_layers = []
+
+        for layer_name in self.layers:
+            layer = self.wms.contents[layer_name]
+            crs = layer.boundingBox[-1] if layer.boundingBox else None
+
+            if not crs:
+                continue
+
+            # Extract EPSG code number
+            epsg_code = int(crs.split(":")[1]) if ":" in crs else 0
+
+            # Prefer projected coordinate systems (better for area-based bbox generation)
+            # EPSG:3xxx (except 3857), EPSG:2xxx, EPSG:32xxx (UTM)
+            if (2000 <= epsg_code < 4000 and epsg_code != 3857) or (32600 <= epsg_code < 32800):
+                preferred_layers.append(layer_name)
+            else:
+                fallback_layers.append(layer_name)
+
+        # Return first preferred layer, or fallback to first available
+        if preferred_layers:
+            return preferred_layers[0]
+        elif fallback_layers:
+            return fallback_layers[0]
+        else:
+            return self.layers[0]
+
     @task
     def load_map(self):
         """
@@ -153,19 +191,30 @@ class WMSBenchmark(FastHttpUser):
         url_path = f"{self.host}?service=WMS&version=1.3.0&request=GetMap&layers={self.layer_name}&styles=&bbox={bbox_str}&width=512&height=512&crs={self.crs}&format={self.layer_mimetype}"
 
         # Making the GET request to load the map
+        logger.debug(f"Layer: {self.layer_name}, CRS: {self.crs}, BBOX: {bbox_str}")
         logger.debug(f"URL for request: {url_path}")
 
         with self.client.get(url_path, catch_response=True, name="GetMap") as response:
             if response.status_code == 200:
-                content_type = response.headers.get('content-type', '').lower()
-                if content_type.startswith('image/'):
+                content_type = response.headers.get("content-type", "").lower()
+                if content_type.startswith("image/"):
                     response.success()
-                elif 'xml' in content_type and 'exception' in response.text.lower():
+                elif "xml" in content_type and "exception" in response.text.lower():
                     response.failure(f"OGC Exception: {response.text[:200]}")
                 else:
                     response.failure(f"Invalid content type: {content_type}")
             else:
-                response.failure(f"HTTP {response.status_code}: {response.reason}")
+                # Categorize errors for better reporting
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code in [502, 503, 504]:
+                    # Server overload/unavailability - common during load testing
+                    response.failure(f"Server Overload: HTTP {response.status_code}")
+                elif "xml" in content_type and response.text:
+                    # OGC service exception
+                    response.failure(f"OGC Error {response.status_code}: {response.text[:300]}")
+                else:
+                    # Other HTTP errors
+                    response.failure(f"HTTP {response.status_code}")
 
 
 # Example running code for testing the WMS benchmark

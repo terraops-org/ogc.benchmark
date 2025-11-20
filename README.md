@@ -98,21 +98,31 @@ List of URLs and layer information:
 |Carta do Regime de Uso do Solo - Portugal Continental| [https://servicos.dgterritorio.pt/SDISNITWMSCRUS/WMService.aspx?service=wmts&request=getcapabilities](https://servicos.dgterritorio.pt/SDISNITWMSCRUS/WMService.aspx?service=wmts&request=getcapabilities) |CRUS| EPSG:3763|minx="-325383.32" miny="-317959.32" maxx="369324.95" maxy="293637.73"|
 |PDOK luchtfoto 2023 | [https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0?service=wmts&request=getcapabilities](https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0?service=wmts&request=getcapabilities) | Actueel_orthoHR |EPSG:28992|  minx="-2000.0" miny="290000.0" maxx="294000.0" maxy="630000.0" |
 
-## Code Debug
+## Testing
 
-Currentely there is no pytest code, but there is proto-pytest code on `__main__`, the following lines can be ajusted to make script test, with these default links:
+The project includes comprehensive pytest tests:
 
-```python
-wmts_benchmark.host="https://cartografia.dgterritorio.gov.pt/ortos2021/service"
-env.parsed_options.tile_random_seed = 1234
-env.parsed_options.layer_name = "Ortos2021-RGB"
-env.parsed_options.tile_matrix_set = "PTTM_06" # Most extreme case
-env.parsed_options.tile_matrix = "07"
+```bash
+# Run all tests
+make test
+
+# Run specific test types
+make test-unit         # Unit tests only
+make test-integration  # Integration tests only
+make test-live         # Live PDOK service tests (requires network)
+make test-fast         # Skip slow and network tests
+
+# Generate coverage report
+make coverage
+
+# Using pytest directly
+pytest                              # All tests
+pytest -m "unit"                    # Unit tests only
+pytest -m "not network"             # Skip network tests
+pytest tests/test_wmts_benchmark.py # Single test file
 ```
 
-Note: Attribute values as in the command locust command line structure.
-
-To run tests: `python wmts.py`.
+See [tests/README.md](tests/README.md) for detailed testing documentation.
 
 ## Code lint
 

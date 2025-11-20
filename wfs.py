@@ -102,18 +102,28 @@ class WFSBenchmark(FastHttpUser):
 
         with self.client.get(url_path, catch_response=True, name="GetFeature") as response:
             if response.status_code == 200:
-                content_type = response.headers.get('content-type', '').lower()
-                if 'xml' in content_type or 'gml' in content_type:
-                    if 'exception' in response.text.lower():
+                content_type = response.headers.get("content-type", "").lower()
+                if "xml" in content_type or "gml" in content_type:
+                    if "exception" in response.text.lower():
                         response.failure(f"OGC Exception: {response.text[:200]}")
                     else:
                         response.success()
-                elif 'json' in content_type:
+                elif "json" in content_type:
                     response.success()
                 else:
                     response.failure(f"Invalid content type: {content_type}")
             else:
-                response.failure(f"HTTP {response.status_code}: {response.reason}")
+                # Categorize errors for better reporting
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code in [502, 503, 504]:
+                    # Server overload/unavailability - common during load testing
+                    response.failure(f"Server Overload: HTTP {response.status_code}")
+                elif "xml" in content_type and response.text:
+                    # OGC service exception
+                    response.failure(f"OGC Error {response.status_code}: {response.text[:300]}")
+                else:
+                    # Other HTTP errors
+                    response.failure(f"HTTP {response.status_code}")
 
 
 # Example running code for testing the WFS benchmark

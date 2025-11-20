@@ -190,15 +190,25 @@ class WMTSBenchmark(FastHttpUser):
 
         with self.client.get(url_path, catch_response=True, name="GetTile") as response:
             if response.status_code == 200:
-                content_type = response.headers.get('content-type', '').lower()
-                if content_type.startswith('image/'):
+                content_type = response.headers.get("content-type", "").lower()
+                if content_type.startswith("image/"):
                     response.success()
-                elif 'xml' in content_type and 'exception' in response.text.lower():
+                elif "xml" in content_type and "exception" in response.text.lower():
                     response.failure(f"OGC Exception: {response.text[:200]}")
                 else:
                     response.failure(f"Invalid content type: {content_type}")
             else:
-                response.failure(f"HTTP {response.status_code}: {response.reason}")
+                # Categorize errors for better reporting
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code in [502, 503, 504]:
+                    # Server overload/unavailability - common during load testing
+                    response.failure(f"Server Overload: HTTP {response.status_code}")
+                elif "xml" in content_type and response.text:
+                    # OGC service exception
+                    response.failure(f"OGC Error {response.status_code}: {response.text[:300]}")
+                else:
+                    # Other HTTP errors
+                    response.failure(f"HTTP {response.status_code}")
 
 
 def random_number_generator(min_value, max_value, seed=None):
