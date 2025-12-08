@@ -44,6 +44,11 @@ def init_parser(parser):
         type=str,
         help="Extra parameters to be added to url request e.g 'api_key=4565'",
     )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="API key to be passed as X-API-Key header for authentication",
+    )
 
 
 class WMSBenchmark(FastHttpUser):
@@ -71,7 +76,14 @@ class WMSBenchmark(FastHttpUser):
         else:
             url_with_payload = f"{self.host}?"
 
-        self.wms = WebMapService(url_with_payload)
+        # Build headers dict if API key is provided
+        self.api_key = self.environment.parsed_options.api_key
+        self.headers = {}
+        if self.api_key:
+            self.headers["X-API-Key"] = self.api_key
+            logger.info(f"Using X-API-Key header for authentication")
+
+        self.wms = WebMapService(url_with_payload, headers=self.headers)
         
         self.layers = self.get_layers()
         self.layer_name = self.environment.parsed_options.layer_name
@@ -160,7 +172,7 @@ class WMSBenchmark(FastHttpUser):
 
         # Making the GET request to load the map
         logger.debug(f"URL for request: {url_path}")
-        response = self.client.get(url_path)
+        response = self.client.get(url_path, headers=self.headers)
 
 
 # Example running code snippet would be similar to your WMTS benchmark
@@ -184,6 +196,8 @@ if __name__ == "__main__":
     env.parsed_options.bbox_area = 100  # square km (10km x 10km)
     env.parsed_options.bbox_ratio = 1.0
     env.parsed_options.layer_name = "Ortoimagens2023-RGB"
+    env.parsed_options.extra_payload = None
+    env.parsed_options.api_key = None
 
     wms_benchmark.environment = env
     # Directly call the on_start to use the setup (if any exception handling, do here)
