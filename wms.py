@@ -1,21 +1,24 @@
-# Arguments not shown on --help bug: https://github.com/locustio/locust/issues/2917
-import sys, os
-import random
-import urllib.parse
+"""WMS GetMap load test: random bboxes on one layer or a weighted layer mix, at one or several zoom levels."""
+
+import logging
+import math
+import os
+from base64 import b64encode
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
 from exceptions import LayerNameArgError
-from locust import FastHttpUser, events, task, between, run_single_user
+from locust import FastHttpUser, between, constant_throughput, events, task
+from owslib.util import Authentication
 from owslib.wms import WebMapService
 
-from utils.random_bbox import generate_random_bbox
-
-import requests
-import logging
+from utils.ogc import CAPABILITIES, IMAGE, check_response, default_options, is_metric, is_yx, user_rng
+from utils.random_bbox import random_bbox
 
 logger = logging.getLogger(__name__)
 
+_CAPABILITIES = {}  # GetCapabilities parsed once per process, not once per user
 
-# extend command line to allow a random-seed (for random bbox creation) and
-# argument for bbox area
+
 @events.init_command_line_parser.add_listener
 def init_parser(parser):
     parser.add_argument(
@@ -23,203 +26,258 @@ def init_parser(parser):
         type=int,
         default=1640,
         env_var="LOCUST_RANDOM_SEED",
-        help="Random seed used to generate the bbox, this is important to prevent server/client caching. Usefull to replicate random bbox. If no seed then 1640 value will be used",
+        help="Seed for the random bboxes: the same seed replays the same requests (default 1640)",
+    )
+    parser.add_argument(
+        "--layer-name",
+        type=str,
+        default="",
+        env_var="LOCUST_LAYER_NAME",
+        help="Layer to benchmark (default: the service's first layer)",
     )
     parser.add_argument(
         "--bbox-area",
         type=float,
         default=100.0,
         env_var="LOCUST_BBOX_AREA",
-        help="Bounding box area in square meters, depending on projection used. Defaults is 100km2 or 10x10km on bbox-ratio=1.0",
+        help="Bbox area in km2 (default 100, i.e. 10 x 10 km with --bbox-ratio 1.0)",
     )
     parser.add_argument(
         "--bbox-ratio",
         type=float,
         default=1.0,
         env_var="LOCUST_BBOX_RATIO",
-        help="Bounding box width/height ratio, better to keep it as 1.0 (square)",
+        help="Bbox width/height ratio (default 1.0, square)",
     )
     parser.add_argument(
-        "--layer-name",
+        "--layers",
         type=str,
-        env_var="LOCUST_LAYER_NAME",
-        help="Layer to be used for benchmarking. if not set, will default to service's first layer",
+        default="",
+        env_var="LOCUST_LAYERS",
+        help="Weighted layer mix, e.g. 'layerA:55,layerB:15'. Overrides --layer-name.",
     )
+    parser.add_argument(
+        "--bbox-areas",
+        type=str,
+        default="",
+        env_var="LOCUST_BBOX_AREAS",
+        help="Comma-separated bbox areas in km2, one picked at random per request (zoom mix), e.g. '1,10,100'. "
+        "Overrides --bbox-area.",
+    )
+    parser.add_argument(
+        "--crs",
+        type=str,
+        default="",
+        env_var="LOCUST_CRS",
+        help="CRS for GetMap, e.g. EPSG:3857 (must be advertised for the layer; EPSG:3857 is derived from the "
+        "WGS84 extent if missing). Default: the layer's first CRS in metres.",
+    )
+    parser.add_argument(
+        "--width", type=int, default=512, env_var="LOCUST_WIDTH", help="GetMap width in pixels (default 512)"
+    )
+    parser.add_argument(
+        "--height", type=int, default=512, env_var="LOCUST_HEIGHT", help="GetMap height in pixels (default 512)"
+    )
+    parser.add_argument(
+        "--user-rps",
+        type=float,
+        default=0.0,
+        env_var="LOCUST_USER_RPS",
+        help="Requests per second per user (constant throughput), so total rate = users x this value. "
+        "Default 0 keeps the 1-2 s wait between requests.",
+    )
+    parser.add_argument(
+        "--caps-ratio",
+        type=float,
+        default=0.0,
+        env_var="LOCUST_CAPS_RATIO",
+        help="Fraction of requests that are GetCapabilities instead of GetMap, e.g. 0.001 (default 0).",
+    )
+    parser.add_argument(
+        "--wms-user",
+        type=str,
+        default=os.getenv("WMS_USER", ""),
+        help="HTTP Basic Auth user (default: env WMS_USER)",
+    )
+    parser.add_argument(
+        "--wms-password",
+        type=str,
+        default=os.getenv("WMS_PASSWORD", ""),
+        is_secret=True,
+        help="HTTP Basic Auth password (default: env WMS_PASSWORD; prefer the env var, the command line is visible in ps)",
+    )
+
+
+@events.init.add_listener
+def on_init(environment, **kwargs):
+    """Apply --user-rps before any user starts (wait_time is a class attribute)."""
+    opts = environment.parsed_options
+    if opts is not None and getattr(opts, "user_rps", 0) > 0:
+        WMSBenchmark.wait_time = constant_throughput(opts.user_rps)
+
+
+def mercator(lon, lat):
+    """WGS84 lon/lat to EPSG:3857 metres."""
+    return lon * 20037508.342789244 / 180, math.log(math.tan((90 + lat) * math.pi / 360)) * 6378137.0
 
 
 class WMSBenchmark(FastHttpUser):
-    """
-    A class to model the benchmarking of a WMS layer using Locust.
-    """
+    """GetMap requests for random bboxes inside a layer's extent."""
 
-    # TODO: extend code to allow seetting CRS's EPGS available
-
-    # The base URL for the host
-    # Without this predefined class atribute the __main__ code can't set the host. It seems like a bug on locust
+    # Without a class attribute the __main__ example cannot set the host
     host = ""
 
-    # Defines a wait time of 1 to 2 seconds between consecutive tasks executed by a simulated user
+    # 1-2 s between requests, replaced by constant_throughput when --user-rps is set
     wait_time = between(1, 2)
 
+    # Timeouts extended for very slow servers (seconds)
+    network_timeout = 120.0
+    connection_timeout = 120.0
+
     def on_start(self):
-        """
-        On start, fetch the WMS capabilities to determine layers and other parameters.
-        """
-        try:
-            self.wms = WebMapService(self.host)
-        except Exception as e:
-            logger.error(f"Failed to connect to WMS service at {self.host}: {e}")
-            self.environment.runner.quit()
-            raise
+        """Read GetCapabilities (once per process), then pick layers, extents and this user's random stream."""
+        opts = self.environment.parsed_options
+        self.headers = {}
+        if opts.wms_user:
+            token = b64encode(f"{opts.wms_user}:{opts.wms_password}".encode()).decode()
+            self.headers["Authorization"] = f"Basic {token}"
 
-        self.layers = self.get_layers()
-        self.layer_name = self.environment.parsed_options.layer_name
-        if self.layer_name:
-            if self.layer_name not in self.layers:
-                error_message = (
-                    f"The specified WMS layer '{self.layer_name}' is not available WMS service'{self.wms.identification.title}'. "
-                    f"Please check the layer name for any typos or omit the '--layer-name' argument to use the first available layer.  "
-                    f"Available layers: {self.layers}"
-                )
-                raise LayerNameArgError(error_message)
-            else:
-                pass  # all good with layer name
-        else:  # user didn't define layer - intelligently select best one
-            logger.info(f"No --layer-name argument, selecting best layer from service")
-            self.layer_name = self._select_best_layer()
-            logger.info(f"Auto-selected layer: '{self.layer_name}'")
+        first_user = (self.host, opts.wms_user) not in _CAPABILITIES
+        self.wms = self.get_wms(opts)
+        self.layers = list(self.wms.contents)
 
-        self.layer = self.wms.contents[self.layer_name]
-
-        # get layej proj
-        # self.srs = "EPSG:3763"  #'EPSG:3763' layer.boundingBox[-1] # Assuming EPSG:3763 for demonstration. Extract from GetCapabilities for dynamic approach.
-        self.crs = self.get_crs()
-        # self.layer_mimetype = urllib.parse.quote(
-        # For now the first format available later to do also as argument
-        self.layer_mimetype = self.wms.getOperationByName("GetMap").formatOptions[0]  # ['image/jpeg']
-
-        self.bbox = self.get_bbox()  # A generic BBOX, ideally parse GetCapabilities for valid ranges.
-
-        self.bbox_generator = generate_random_bbox(
-            *self.get_bbox(),
-            area=self.environment.parsed_options.bbox_area,
-            ratio=self.environment.parsed_options.bbox_ratio,
-            seed=self.environment.parsed_options.random_seed,
-        )
-        logger.info(f"bbox area in km2:{self.environment.parsed_options.bbox_area}")
-        logger.info(f"bbox aspect ration:{self.environment.parsed_options.bbox_ratio}")
-        logger.info(f"bbox random seed:{self.environment.parsed_options.random_seed}")
-
-    def get_bbox(self):
-        """
-        Get the bbox from layer.boundinBox
-        """
-        return (
-            self.layer.boundingBox[0],
-            self.layer.boundingBox[1],
-            self.layer.boundingBox[2],
-            self.layer.boundingBox[3],
-        )
-
-    def get_crs(self):
-        """
-        Gets the src from owslib layer's bbox, the last element is the srs information as EPSG:3763
-        """
-        # TODO: check if we get a real EPSG code
-        # ['EPSG:4258', 'EPSG:3857', 'EPSG:25831', 'EPSG:25832', 'EPSG:28992', 'EPSG:4326']
-        epsg_code = self.layer.boundingBox[-1]
-        return epsg_code
-
-    def get_layers(self):
-        """
-        Fetch and parse the GetCapabilities document to retrieve layer names.
-        """
-        layers = list()
-        for layer in self.wms.contents:
-            layers.append(layer)
-        return layers
-
-    def _select_best_layer(self):
-        """
-        Select the best layer for benchmarking when no layer is specified.
-        Prefers layers with projected coordinate systems (EPSG:3xxx, 2xxx, 32xxx)
-        over geographic (EPSG:4xxx) or web mercator (EPSG:3857).
-        Skips parent/group layers that may have overly broad extents.
-        """
-        preferred_layers = []
-        fallback_layers = []
-
-        for layer_name in self.layers:
-            layer = self.wms.contents[layer_name]
-            crs = layer.boundingBox[-1] if layer.boundingBox else None
-
-            if not crs:
-                continue
-
-            # Extract EPSG code number
-            epsg_code = int(crs.split(":")[1]) if ":" in crs else 0
-
-            # Prefer projected coordinate systems (better for area-based bbox generation)
-            # EPSG:3xxx (except 3857), EPSG:2xxx, EPSG:32xxx (UTM)
-            if (2000 <= epsg_code < 4000 and epsg_code != 3857) or (32600 <= epsg_code < 32800):
-                preferred_layers.append(layer_name)
-            else:
-                fallback_layers.append(layer_name)
-
-        # Return first preferred layer, or fallback to first available
-        if preferred_layers:
-            return preferred_layers[0]
-        elif fallback_layers:
-            return fallback_layers[0]
+        # Layer mix: --layers 'a:55,b:15', else the single --layer-name, else the first layer
+        if opts.layers:
+            pairs = [item.rsplit(":", 1) for item in opts.layers.split(",") if item.strip()]
+            mix = [(name.strip(), float(weight)) for name, weight in pairs]
         else:
-            return self.layers[0]
+            if not opts.layer_name:
+                logger.info("No --layer-name argument value, using first layer available in service")
+            mix = [(opts.layer_name or self.layers[0], 1.0)]
+        for name, _ in mix:
+            if name not in self.layers:
+                raise LayerNameArgError(
+                    f"The specified WMS layer '{name}' is not available in WMS service "
+                    f"'{self.wms.identification.title}'. Available layers: {self.layers}"
+                )
+        self.layer_names = [name for name, _ in mix]
+        self.layer_weights = [weight for _, weight in mix]
+        self.extents = {name: self.get_extent(name, opts.crs) for name in self.layer_names}
+        self.areas = [float(a) for a in opts.bbox_areas.split(",")] if opts.bbox_areas else [opts.bbox_area]
+        self.rng = user_rng(self.environment, opts.random_seed)
+        if first_user:
+            logger.info(f"layers (weight): {list(zip(self.layer_names, self.layer_weights))}")
+            logger.info(f"bbox areas in km2: {self.areas}, aspect ratio: {opts.bbox_ratio}, seed: {opts.random_seed}")
+            logger.info(f"extents: {self.extents}")
+
+    def get_wms(self, opts):
+        key = (self.host, opts.wms_user)
+        if key not in _CAPABILITIES:
+            auth = Authentication(opts.wms_user, opts.wms_password) if opts.wms_user else None
+            _CAPABILITIES[key] = WebMapService(self.host, version="1.3.0", auth=auth, timeout=120)
+        return _CAPABILITIES[key]
+
+    def get_extent(self, layer_name, crs):
+        """
+        (minx, miny, maxx, maxy, crs) of a layer, in OWSLib's x/y order.
+
+        With --crs: the layer's box in that CRS (EPSG:3857 derived from WGS84 if the server has none).
+        Without: the first box in a metre CRS, else the first box, else (a layer that inherits its
+        extent) the WGS84 box in CRS:84.
+        """
+        layer = self.wms.contents[layer_name]
+        boxes = getattr(layer, "crs_list", None) or []
+        wgs84 = getattr(layer, "boundingBoxWGS84", None)
+        if not crs:
+            for box in boxes:
+                if is_metric(box[4]):
+                    return tuple(box[:5])
+            if boxes:
+                return tuple(boxes[0][:5])
+            if wgs84:
+                return (*wgs84[:4], "CRS:84")
+            raise LayerNameArgError(f"Layer '{layer_name}' advertises no extent")
+        for box in boxes:
+            if box[4] == crs:
+                return tuple(box[:5])
+        if crs == "EPSG:3857" and wgs84:  # servers often advertise only the native CRS box; derive Web Mercator
+            west, south, east, north = wgs84[:4]
+            return (*mercator(west, south), *mercator(east, north), crs)
+        raise LayerNameArgError(f"Layer '{layer_name}' has no BoundingBox in {crs}; available: {[b[4] for b in boxes]}")
 
     @task
     def load_map(self):
         """
-        A task that loads a map image from the WMS layer using a random BBOX.
+        A GetMap of a random bbox on a layer from the mix, or (with --caps-ratio) a GetCapabilities.
+        Anything but a 200 image is a failure (MapServer can answer 200 with an XML exception).
         """
-        # For simplicity, selecting the first layer. Adjust as needed.
-        # layer = self.layers[0] if self.layers else "no-layer-available"
+        opts = self.environment.parsed_options
+        if opts.caps_ratio and self.rng.random() < opts.caps_ratio:
+            url = self.service_url({"service": "WMS", "version": "1.3.0", "request": "GetCapabilities"})
+            with self.client.get(url, name="GetCapabilities", headers=self.headers, catch_response=True) as resp:
+                check_response(resp, CAPABILITIES)
+            return
 
-        # Lets get a random bbx
-        bbox = next(self.bbox_generator)
-        # bbox = next(generate_random_bbox(*self.bbox))
-        bbox_str = ",".join(map(str, bbox))
-
-        # Constructing the URL path #&srs={self.srs}
-        url_path = f"{self.host}?service=WMS&version=1.3.0&request=GetMap&layers={self.layer_name}&styles=&bbox={bbox_str}&width=512&height=512&crs={self.crs}&format={self.layer_mimetype}"
-
-        # Making the GET request to load the map
-        logger.debug(f"Layer: {self.layer_name}, CRS: {self.crs}, BBOX: {bbox_str}")
+        layer = self.rng.choices(self.layer_names, weights=self.layer_weights)[0]
+        minx, miny, maxx, maxy, crs = self.extents[layer]
+        area = self.rng.choice(self.areas)
+        box = random_bbox(self.rng, (minx, miny, maxx, maxy), area, opts.bbox_ratio, geographic=not is_metric(crs))
+        if is_yx(crs):  # WMS 1.3.0 wants latitude/northing first for these CRSs; OWSLib gives x/y
+            box = (box[1], box[0], box[3], box[2])
+        url_path = self.get_url(",".join(map(str, box)), layer=layer, crs=crs)
         logger.debug(f"URL for request: {url_path}")
+        with self.client.get(url_path, name=f"GetMap {layer}", headers=self.headers, catch_response=True) as resp:
+            check_response(resp, IMAGE)
 
-        with self.client.get(url_path, catch_response=True, name="GetMap") as response:
-            if response.status_code == 200:
-                content_type = response.headers.get("content-type", "").lower()
-                if content_type.startswith("image/"):
-                    response.success()
-                elif "xml" in content_type and "exception" in response.text.lower():
-                    response.failure(f"OGC Exception: {response.text[:200]}")
-                else:
-                    response.failure(f"Invalid content type: {content_type}")
-            else:
-                # Categorize errors for better reporting
-                content_type = response.headers.get("content-type", "").lower()
-                if response.status_code in [502, 503, 504]:
-                    # Server overload/unavailability - common during load testing
-                    response.failure(f"Server Overload: HTTP {response.status_code}")
-                elif "xml" in content_type and response.text:
-                    # OGC service exception
-                    response.failure(f"OGC Error {response.status_code}: {response.text[:300]}")
-                else:
-                    # Other HTTP errors
-                    response.failure(f"HTTP {response.status_code}")
+    def service_url(self, params):
+        """
+        The host URL with params merged into its query string (the host may already carry ?map=...).
+        """
+        url_parts = urlparse(self.host)
+        query_params = parse_qs(url_parts.query)
+        query_params.update(params)
+        return urlunparse(url_parts._replace(query=urlencode(query_params, doseq=True)))
+
+    def get_url(self, bbox_str, layer=None, crs=None):
+        """
+        The GetMap URL for bbox_str ("minx,miny,maxx,maxy" in the axis order the CRS needs).
+
+        layer defaults to the first layer of the mix, crs to that layer's extent CRS. Example:
+        get_url("120000,480000,130000,490000", "Actueel_orthoHR", "EPSG:28992") on host
+        https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0 gives
+        https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0?service=WMS&version=1.3.0&request=GetMap&layers=Actueel_orthoHR&styles=&bbox=120000%2C480000%2C130000%2C490000&width=512&height=512&crs=EPSG%3A28992&format=image%2Fpng
+        """
+        layer = layer or self.layer_names[0]
+        opts = self.environment.parsed_options
+        params = {
+            "service": "WMS",
+            "version": "1.3.0",
+            "request": "GetMap",
+            "layers": layer,
+            "styles": "",
+            "bbox": bbox_str,
+            "width": str(opts.width),
+            "height": str(opts.height),
+            "crs": crs or self.extents[layer][4],
+            "format": "image/png",
+        }
+        return self.service_url(params)
 
 
-# Example running code for testing the WMS benchmark
+# Example: one GetMap against a public PDOK WMS, CRS chosen automatically
 if __name__ == "__main__":
-    print("WMS Benchmark class - Use with locust command line tool:")
-    print("locust -f wms.py --host https://example.com/wms")
-    print("Available options: --layer-name, --bbox-area, --bbox-ratio, --random-seed")
-    print("Environment variables: LOCUST_LAYER_NAME, LOCUST_BBOX_AREA, etc.")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    from locust.env import Environment
+
+    env = Environment(user_classes=[WMSBenchmark])
+    env.create_local_runner()
+    env.parsed_options = default_options(init_parser, "--layer-name", "Actueel_orthoHR")
+    env.events.request.add_listener(
+        lambda name, response, exception, **kw: print(name, response.status_code, exception)
+    )
+
+    user = WMSBenchmark(env)
+    user.host = "https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0"
+    user.on_start()
+    user.load_map()
+    env.runner.quit()

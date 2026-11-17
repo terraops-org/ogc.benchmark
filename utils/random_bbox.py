@@ -2,15 +2,19 @@ from typing import Generator, Tuple
 import random
 from decimal import Decimal, getcontext
 import math
+
 # Set precision for Decimal calculations
-getcontext().prec = 6 # 12
+getcontext().prec = 6  # 12
 
 # Constants
-KM_PER_DEGREE_LAT = Decimal('111.321')  # Approximate kilometers per degree of latitude at the equator
+KM_PER_DEGREE_LAT = Decimal("111.321")  # Approximate kilometers per degree of latitude at the equator
+
 
 class BBoxError(Exception):
     """Custom exception for bounding box errors."""
+
     pass
+
 
 def calculate_area_km2(lat: Decimal, width_deg: Decimal, height_deg: Decimal) -> Decimal:
     """
@@ -21,6 +25,7 @@ def calculate_area_km2(lat: Decimal, width_deg: Decimal, height_deg: Decimal) ->
     width_km = width_deg * KM_PER_DEGREE_LAT * Decimal(math.cos(math.radians(float(lat))))
     height_km = height_deg * KM_PER_DEGREE_LAT
     return width_km * height_km
+
 
 def generate_random_bbox_degrees(
     full_bbox_minx: float,
@@ -34,13 +39,13 @@ def generate_random_bbox_degrees(
     """
     Generate a random sub-bounding box in degrees (EPSG:4326) within the full extent of the input bounding box.
     It tries to approximate the desired area in square kilometers.
-    
+
     Parameters:
     - full_bbox_minx, full_bbox_miny, full_bbox_maxx, full_bbox_maxy (float): Coordinates of the full extent bounding box (in degrees).
     - area (float): Desired area of the sub-bounding box in square kilometers.
     - ratio (float): Width to height ratio of the sub-bounding box.
     - seed (int): Optional. Seed value for deterministic random bbox generation.
-    
+
     Yields:
     - A tuple of floats representing the sub-bounding box in the format (minx, miny, maxx, maxy).
     """
@@ -66,18 +71,17 @@ def generate_random_bbox_degrees(
     while True:
         # Random latitude within the bbox
         random_lat = Decimal(random.uniform(float(full_bbox_miny), float(full_bbox_maxy)))
-        #random_lat = Decimal(random.uniform(full_bbox_miny, full_bbox_maxy))
-        
+        # random_lat = Decimal(random.uniform(full_bbox_miny, full_bbox_maxy))
+
         # Height and width based on the input area and ratio
         height_km = (area / ratio).sqrt()
         width_km = ratio * height_km
-        
+
         # Convert height from km to degrees of latitude
         height_deg = height_km / KM_PER_DEGREE_LAT
-        
+
         # Convert width from km to degrees of longitude (depends on latitude)
         width_deg = width_km / (KM_PER_DEGREE_LAT * Decimal(math.cos(math.radians(float(random_lat)))))
-
 
         # Ensure the bbox fits within the given extent
         max_start_x = full_bbox_maxx - width_deg
@@ -93,7 +97,6 @@ def generate_random_bbox_degrees(
             float(random_start_x + width_deg),
             float(random_start_y + height_deg),
         )
-
 
 
 def generate_random_bbox(
@@ -141,7 +144,7 @@ def generate_random_bbox(
 
     # Calculate height and width in kilometers
     height_km = (area / ratio).sqrt()  # height = sqrt(area / ratio)
-    width_km = ratio * height_km        # width = ratio * height
+    width_km = ratio * height_km  # width = ratio * height
 
     # Convert km to meters
     side_length_x = width_km * 1000
@@ -164,6 +167,28 @@ def generate_random_bbox(
         )
 
 
+def random_bbox(rng, extent, area_km2, ratio, geographic=False):
+    """
+    One random bbox of area_km2 (width/height = ratio) inside extent (minx, miny, maxx, maxy), drawn from rng.
+
+    Map units are metres, or degrees with geographic=True (the width then follows the latitude). A bbox
+    larger than the extent starts at the extent's min corner.
+    """
+    minx, miny, maxx, maxy = extent
+    height_km = math.sqrt(area_km2 / ratio)
+    km_per_degree = float(KM_PER_DEGREE_LAT)
+    if geographic:
+        height = height_km / km_per_degree
+        y = rng.uniform(miny, max(miny, maxy - height))
+        width = ratio * height_km / (km_per_degree * math.cos(math.radians(y + height / 2)))
+    else:
+        height = height_km * 1000
+        width = ratio * height
+        y = rng.uniform(miny, max(miny, maxy - height))
+    x = rng.uniform(minx, max(minx, maxx - width))
+    return (x, y, x + width, y + height)
+
+
 # Example usage and testing
 if __name__ == "__main__":
     try:
@@ -175,29 +200,27 @@ if __name__ == "__main__":
             52556.184387814734,
             -308975.43338224955,
         )
-        bbox_generator = generate_random_bbox(
-            -144205.734375, -326024.8125, 162129.09375, 276083.78125, **test1
-        )
+        bbox_generator = generate_random_bbox(-144205.734375, -326024.8125, 162129.09375, 276083.78125, **test1)
         result_bbox = next(bbox_generator)
-        
-        #assert test1_result == result_bbox
-        
+
+        # assert test1_result == result_bbox
+
         print(f"Generated BBox: {result_bbox}")
 
     except BBoxError as e:
         print(f"Error generating bbox: {e}")
 
-# now for the degree function testing
+    # now for the degree function testing
 
-    bbox_generator_degrees = generate_random_bbox_degrees(
-        -9.5, 36.8, -6.2, 42.2, seed=42, area=1000, ratio=1.0
-    )
+    bbox_generator_degrees = generate_random_bbox_degrees(-9.5, 36.8, -6.2, 42.2, seed=42, area=1000, ratio=1.0)
     random_bbox = next(bbox_generator_degrees)
     print(f"Random Bounding Box in EPSG:4326: {random_bbox}")
 
     # Calculate the actual area of the generated bbox
-    
+
     lat_center = Decimal((random_bbox[1] + random_bbox[3]) / 2)
-    actual_area = calculate_area_km2(lat_center, Decimal(random_bbox[2] - random_bbox[0]), Decimal(random_bbox[3] - random_bbox[1]))
+    actual_area = calculate_area_km2(
+        lat_center, Decimal(random_bbox[2] - random_bbox[0]), Decimal(random_bbox[3] - random_bbox[1])
+    )
     print(f"Actual Area of Generated BBox: {actual_area:.2f} km²")
     print(f"Generated BBOX: {random_bbox[0]},{random_bbox[1]},{random_bbox[2]},{random_bbox[3]}")

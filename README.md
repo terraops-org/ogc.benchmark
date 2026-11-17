@@ -64,6 +64,29 @@ uv run locust -f wms.py --headless --host https://service.pdok.nl/hwh/luchtfotor
 uv run locust -f wfs.py --headless --host https://service.pdok.nl/lv/bag/wfs/v2_0 --feature-name bag:pand -u 5 -r 1 -t 2m --html wfs-report.html
 ```
 
+### WMS options
+
+`wms.py` sends GetMap (WMS 1.3.0, `image/png`) for random bboxes inside the layer's extent. Every option
+can also be set with the environment variable next to it.
+
+|Option|Env variable|Description|Default|
+|:-----|:-----------|:----------|:------|
+|`--layer-name`|`LOCUST_LAYER_NAME`|Layer to benchmark|first layer in GetCapabilities|
+|`--layers`|`LOCUST_LAYERS`|Weighted layer mix, e.g. `layerA:55,layerB:45` (overrides `--layer-name`); stats are reported per layer|not set|
+|`--bbox-area`|`LOCUST_BBOX_AREA`|Bbox area in km2|100|
+|`--bbox-areas`|`LOCUST_BBOX_AREAS`|Bbox areas in km2, one picked at random per request (zoom mix, overrides `--bbox-area`), e.g. `1,10,100`|not set|
+|`--bbox-ratio`|`LOCUST_BBOX_RATIO`|Bbox width/height ratio|1.0|
+|`--crs`|`LOCUST_CRS`|GetMap CRS; must be advertised by the layer (EPSG:3857 is derived from the WGS84 extent if missing)|the layer's first CRS in metres, else its first CRS|
+|`--width` / `--height`|`LOCUST_WIDTH` / `LOCUST_HEIGHT`|GetMap size in pixels|512|
+|`--user-rps`|`LOCUST_USER_RPS`|Requests per second per user (constant throughput): total rate = users x value|0 (wait 1-2 s)|
+|`--caps-ratio`|`LOCUST_CAPS_RATIO`|Fraction of requests that are GetCapabilities|0|
+|`--random-seed`|`LOCUST_RANDOM_SEED`|Seed for the random bboxes|1640|
+
+GetCapabilities is read once per process. For CRSs with latitude/northing first (e.g. EPSG:4326) the bbox
+is sent in that axis order, as WMS 1.3.0 requires. A response that is not HTTP 200 with an image counts as
+a failure with a fixed message (`Connection error`, `Server Overload: HTTP 503`, `OGC Error: HTTP 400`,
+`HTTP 404`, `OGC Exception`, `Invalid content type: text/html`), so Locust groups them in one row each.
+
 ## Comparing results across versions
 
 Results compare only when the seed, the options and the tool version match. Since the move to

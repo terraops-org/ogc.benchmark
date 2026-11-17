@@ -1,9 +1,36 @@
 """Unit tests for utility functions"""
+
 import pytest
 import responses
 from unittest.mock import patch
 from utils import get_feature_count
-from utils.random_bbox import generate_random_bbox, generate_random_bbox_degrees, BBoxError
+import math
+import random
+
+from utils.random_bbox import generate_random_bbox, generate_random_bbox_degrees, BBoxError, random_bbox
+
+
+class TestRandomBboxRng:
+    """random_bbox: one bbox per call from a caller-owned random.Random"""
+
+    def test_random_bbox_metres(self):
+        minx, miny, maxx, maxy = random_bbox(random.Random(1), (0, 0, 100000, 100000), 100, 1.0)
+        assert maxx - minx == pytest.approx(10000.0, abs=1e-6)
+        assert maxy - miny == pytest.approx(10000.0, abs=1e-6)
+        assert 0 <= minx and maxx <= 100000 and 0 <= miny and maxy <= 100000
+
+    def test_random_bbox_degrees(self):
+        minx, miny, maxx, maxy = random_bbox(random.Random(1), (4.0, 52.0, 5.0, 53.0), 100, 1.0, geographic=True)
+        w, h = maxx - minx, maxy - miny
+        assert h == pytest.approx(100**0.5 / 111.321)
+        lat_centre = (miny + maxy) / 2
+        area = w * 111.321 * math.cos(math.radians(lat_centre)) * h * 111.321
+        assert area == pytest.approx(100, rel=0.01)
+        assert 4.0 <= minx and maxx <= 5.0 and 52.0 <= miny and maxy <= 53.0
+
+    def test_random_bbox_bigger_than_extent(self):
+        minx, miny, _, _ = random_bbox(random.Random(1), (0, 0, 1000, 1000), 1e6, 1.0)
+        assert (minx, miny) == (0, 0)
 
 
 class TestGetFeatureCount:
@@ -13,19 +40,15 @@ class TestGetFeatureCount:
     def test_get_feature_count_success(self):
         """Test successful feature count retrieval"""
         # Mock XML response
-        xml_response = '''<?xml version="1.0" encoding="UTF-8"?>
+        xml_response = """<?xml version="1.0" encoding="UTF-8"?>
         <wfs:FeatureCollection
             xmlns:wfs="http://www.opengis.net/wfs/2.0"
             numberMatched="42"
             numberReturned="0">
-        </wfs:FeatureCollection>'''
+        </wfs:FeatureCollection>"""
 
         responses.add(
-            responses.GET,
-            "http://example.com/wfs",
-            body=xml_response,
-            status=200,
-            content_type="application/xml"
+            responses.GET, "http://example.com/wfs", body=xml_response, status=200, content_type="application/xml"
         )
 
         result = get_feature_count("test:feature", "http://example.com/wfs")
@@ -34,11 +57,7 @@ class TestGetFeatureCount:
     @responses.activate
     def test_get_feature_count_http_error(self):
         """Test handling of HTTP errors"""
-        responses.add(
-            responses.GET,
-            "http://example.com/wfs",
-            status=404
-        )
+        responses.add(responses.GET, "http://example.com/wfs", status=404)
 
         result = get_feature_count("test:feature", "http://example.com/wfs")
         assert result is None
