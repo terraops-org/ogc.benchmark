@@ -13,6 +13,7 @@ import pytest
 from locust.env import Environment
 
 import wms
+from utils import ogc
 from utils.ogc import default_options
 from wms import WMSBenchmark
 
@@ -25,7 +26,7 @@ pytestmark = [
 
 
 def make_user(password):
-    wms._CAPABILITIES.clear()
+    ogc._CAPS.clear()
     env = Environment(user_classes=[WMSBenchmark])
     env.create_local_runner()
     env.parsed_options = default_options(wms.init_parser, "--auth-user", USER, "--auth-password", password)

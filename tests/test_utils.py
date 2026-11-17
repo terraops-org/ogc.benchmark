@@ -2,12 +2,11 @@
 
 import pytest
 import responses
-from unittest.mock import patch
 from utils import get_feature_count
 import math
 import random
 
-from utils.random_bbox import generate_random_bbox, generate_random_bbox_degrees, BBoxError, random_bbox
+from utils.random_bbox import random_bbox
 
 
 class TestRandomBboxRng:
@@ -27,6 +26,11 @@ class TestRandomBboxRng:
         area = w * 111.321 * math.cos(math.radians(lat_centre)) * h * 111.321
         assert area == pytest.approx(100, rel=0.01)
         assert 4.0 <= minx and maxx <= 5.0 and 52.0 <= miny and maxy <= 53.0
+
+    @pytest.mark.parametrize("area, ratio", [(0, 1.0), (-1, 1.0), (100, 0), (100, -2)])
+    def test_random_bbox_rejects_bad_input(self, area, ratio):
+        with pytest.raises(ValueError):
+            random_bbox(random.Random(1), (0, 0, 1000, 1000), area, ratio)
 
     def test_random_bbox_bigger_than_extent(self):
         minx, miny, _, _ = random_bbox(random.Random(1), (0, 0, 1000, 1000), 1e6, 1.0)
@@ -77,69 +81,3 @@ class TestGetFeatureCount:
             assert "request=GetFeature" in request.url
             assert "typenames=au%3AAU.AdministrativeUnits" in request.url
             assert "resultType=hits" in request.url
-
-
-class TestRandomBbox:
-    """Test the random bounding box generation functions"""
-
-    def test_generate_random_bbox_basic(self):
-        """Test basic bbox generation"""
-        bbox_gen = generate_random_bbox(0, 0, 1000, 1000, seed=42, area=100, ratio=1.0)
-        bbox = next(bbox_gen)
-
-        assert len(bbox) == 4
-        assert bbox[0] < bbox[2]  # minx < maxx
-        assert bbox[1] < bbox[3]  # miny < maxy
-
-    def test_generate_random_bbox_deterministic(self):
-        """Test that same seed produces same results"""
-        bbox_gen1 = generate_random_bbox(0, 0, 1000, 1000, seed=42, area=100, ratio=1.0)
-        bbox_gen2 = generate_random_bbox(0, 0, 1000, 1000, seed=42, area=100, ratio=1.0)
-
-        bbox1 = next(bbox_gen1)
-        bbox2 = next(bbox_gen2)
-
-        assert bbox1 == bbox2
-
-    def test_generate_random_bbox_different_seeds(self):
-        """Test that different seeds produce different results"""
-        bbox_gen1 = generate_random_bbox(0, 0, 1000, 1000, seed=42, area=100, ratio=1.0)
-        bbox_gen2 = generate_random_bbox(0, 0, 1000, 1000, seed=43, area=100, ratio=1.0)
-
-        bbox1 = next(bbox_gen1)
-        bbox2 = next(bbox_gen2)
-
-        assert bbox1 != bbox2
-
-    def test_generate_random_bbox_invalid_params(self):
-        """Test error handling for invalid parameters"""
-        with pytest.raises(BBoxError):
-            # Invalid bbox dimensions
-            next(generate_random_bbox(1000, 0, 0, 1000, seed=42, area=100, ratio=1.0))
-
-        with pytest.raises(BBoxError):
-            # Negative area
-            next(generate_random_bbox(0, 0, 1000, 1000, seed=42, area=-100, ratio=1.0))
-
-        with pytest.raises(BBoxError):
-            # Invalid ratio
-            next(generate_random_bbox(0, 0, 1000, 1000, seed=42, area=100, ratio=0))
-
-    def test_generate_random_bbox_degrees_basic(self):
-        """Test basic degree-based bbox generation"""
-        bbox_gen = generate_random_bbox_degrees(-9.5, 36.8, -6.2, 42.2, seed=42, area=100, ratio=1.0)
-        bbox = next(bbox_gen)
-
-        assert len(bbox) == 4
-        assert -9.5 <= bbox[0] < bbox[2] <= -6.2  # Within longitude bounds
-        assert 36.8 <= bbox[1] < bbox[3] <= 42.2  # Within latitude bounds
-
-    def test_generate_random_bbox_degrees_deterministic(self):
-        """Test deterministic behavior with degrees"""
-        bbox_gen1 = generate_random_bbox_degrees(-9.5, 36.8, -6.2, 42.2, seed=42, area=100, ratio=1.0)
-        bbox_gen2 = generate_random_bbox_degrees(-9.5, 36.8, -6.2, 42.2, seed=42, area=100, ratio=1.0)
-
-        bbox1 = next(bbox_gen1)
-        bbox2 = next(bbox_gen2)
-
-        assert bbox1 == bbox2

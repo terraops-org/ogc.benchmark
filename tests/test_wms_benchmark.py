@@ -5,11 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
+import gevent
 import pytest
 from locust.env import Environment
 
 import wms
-from exceptions import LayerNameArgError
+from exceptions import ArgError
+from locust.argument_parser import LocustArgumentParser
+
+from utils import ogc
 from utils.ogc import default_options
 from wms import WMSBenchmark
 
@@ -17,17 +21,19 @@ WGS84 = (3.0, 50.0, 7.0, 54.0)
 RD = (0.0, 300000.0, 280000.0, 620000.0)
 
 
-def layer(crs_list, wgs84=WGS84):
+def layer(crs_list, wgs84=WGS84, crs_options=None, parent=None):
     """An OWSLib-like layer: boundingBox is the first own box, or the WGS84 4-tuple when it has none."""
     lay = Mock()
     lay.crs_list = crs_list
     lay.boundingBox = crs_list[0] if crs_list else wgs84
     lay.boundingBoxWGS84 = wgs84
+    lay.crsOptions = crs_options if crs_options is not None else [box[4] for box in crs_list] or ["CRS:84"]
+    lay.parent = parent
     return lay
 
 
 def make_user(*args, layers=None):
-    wms._CAPABILITIES.clear()
+    ogc._CAPS.clear()
     env = Environment(user_classes=[WMSBenchmark])
     env.create_local_runner()
     env.parsed_options = default_options(wms.init_parser, *args)
@@ -82,7 +88,7 @@ def test_yx_crs_swaps_bbox():
 
 
 def test_explicit_crs_missing_raises():
-    with pytest.raises(LayerNameArgError):
+    with pytest.raises(ArgError):
         make_user("--layer-name", "a", "--crs", "EPSG:3006")
 
 
@@ -94,7 +100,7 @@ def test_epsg3857_derived_from_wgs84():
 
 
 def test_unknown_layer_raises():
-    with pytest.raises(LayerNameArgError):
+    with pytest.raises(ArgError):
         make_user("--layer-name", "nope")
 
 
@@ -153,3 +159,90 @@ def test_password_not_logged(caplog):
 def test_old_flags_gone():
     with pytest.raises(SystemExit):
         default_options(wms.init_parser, "--wms-user", "x")
+
+
+def test_inherited_parent_boxes():
+    """WMS 1.3.0: a layer without boxes of its own inherits its parent's BoundingBoxes."""
+    parent = layer([(*WGS84, "EPSG:4326"), (*RD, "EPSG:28992")])
+    child = layer([], crs_options=["EPSG:28992", "EPSG:4326"], parent=parent)
+    user = make_user("--layer-name", "a", layers={"a": child})
+    assert user.extents["a"] == (*RD, "EPSG:28992")
+    user = make_user("--layer-name", "a", "--crs", "EPSG:4326", layers={"a": child})
+    assert user.extents["a"] == (*WGS84, "EPSG:4326")
+
+
+def test_no_boxes_and_no_crs84_falls_back_to_epsg4326():
+    user = make_user("--layer-name", "a", layers={"a": layer([], crs_options=["EPSG:4326"])})
+    assert user.extents["a"] == (*WGS84, "EPSG:4326")
+    query, _ = run_map(user)
+    first, second, _, _ = bbox(query)
+    assert 50.0 <= first <= 54.0 and 3.0 <= second <= 7.0  # EPSG:4326 goes latitude first
+
+
+def test_crs_in_feet_refused():
+    feet = (900000.0, 120000.0, 1070000.0, 280000.0)
+    with pytest.raises(ArgError):
+        make_user("--layer-name", "a", layers={"a": layer([(*feet, "EPSG:2263")])})
+
+
+def test_mercator_clamps_the_poles():
+    _, south = wms.mercator(-180, -90)
+    _, north = wms.mercator(180, 90)
+    assert south == pytest.approx(-20037508.34, abs=1) and north == pytest.approx(20037508.34, abs=1)
+
+
+@pytest.mark.parametrize(
+    "mix, names, weights",
+    [("a", ["a"], [1.0]), ("ns:a", ["ns:a"], [1.0]), ("ns:a:2,a:3", ["ns:a", "a"], [2.0, 3.0])],
+)
+def test_layer_mix_parsing(mix, names, weights):
+    layers = {"a": layer([(*RD, "EPSG:28992")]), "ns:a": layer([(*RD, "EPSG:28992")])}
+    user = make_user("--layers", mix, layers=layers)
+    assert (user.layer_names, user.layer_weights) == (names, weights)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--bbox-area", "0"),
+        ("--bbox-areas", "1,0"),
+        ("--bbox-areas", "1,x"),
+        ("--bbox-ratio", "0"),
+        ("--layers", "a:0"),
+        ("--auth-password", "p"),
+    ],
+    ids=str,
+)
+def test_bad_options_stop_at_start(args):
+    with pytest.raises(ArgError):
+        make_user("--layer-name", "a", *args)
+
+
+def test_capabilities_failure_stops_the_run():
+    ogc._CAPS.clear()
+    env = Environment(user_classes=[WMSBenchmark])
+    env.create_local_runner()
+    env.parsed_options = default_options(wms.init_parser)
+    env.runner.quit = Mock()
+    user = WMSBenchmark(env)
+    user.host = "http://example.com/wms"
+    with patch("wms.WebMapService", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
+        user.on_start()
+    gevent.sleep(0)  # quit() runs in its own greenlet
+    env.runner.quit.assert_called_once()
+    assert env.process_exit_code == 1
+
+
+def test_capabilities_fetched_once_per_process():
+    first = make_user("--layer-name", "a")
+    user = WMSBenchmark(first.environment)  # a second user in the same process
+    user.host = "http://example.com/wms"
+    with patch("wms.WebMapService") as webmapservice:
+        user.on_start()
+    webmapservice.assert_not_called()
+
+
+def test_password_not_in_web_ui():
+    parser = LocustArgumentParser()
+    wms.init_parser(parser)
+    assert "auth_password" not in parser.args_included_in_web_ui  # the web UI page would carry its value

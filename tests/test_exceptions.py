@@ -1,74 +1,64 @@
-"""Tests for custom exceptions"""
-import pytest
+"""Tests for the argument error: a bad option stops the whole run with a clear message."""
+
+from types import SimpleNamespace
 from unittest.mock import Mock
-from exceptions import (
-    BaseArgError,
-    LayerNameArgError,
-    TileMatrixSetArgError,
-    TileMatrixArgError,
-    FeatureNameArgError
-)
+
+import gevent
+import pytest
+
+from exceptions import ArgError
 
 
-class TestBaseArgError:
-    """Test the base argument error class"""
-
-    def test_base_arg_error_inheritance(self):
-        """Test that custom exceptions inherit from BaseArgError"""
-        assert issubclass(LayerNameArgError, BaseArgError)
-        assert issubclass(TileMatrixSetArgError, BaseArgError)
-        assert issubclass(TileMatrixArgError, BaseArgError)
-        assert issubclass(FeatureNameArgError, BaseArgError)
-
-    def test_handle_error_method(self):
-        """Test the handle_error method"""
-        # Create mock environment
-        mock_env = Mock()
-        mock_runner = Mock()
-        mock_env.runner = mock_runner
-
-        # Create exception instance
-        error = BaseArgError("Test error message")
-
-        # Test that handle_error method exists and can be called
-        with pytest.raises(SystemExit):
-            error.handle_error(mock_env)
-
-        # Verify that runner.quit() was called
-        mock_runner.quit.assert_called_once()
+def test_handle_error_quits_runner():
+    environment = SimpleNamespace(runner=Mock())
+    with pytest.raises(ArgError, match="no layer 'x'"):
+        ArgError("no layer 'x'").handle_error(environment)
+    gevent.sleep(0)  # quit() runs in its own greenlet
+    environment.runner.quit.assert_called_once()
 
 
-class TestSpecificExceptions:
-    """Test specific exception classes"""
+def test_handle_error_without_runner():
+    with pytest.raises(ArgError):
+        ArgError("no runner yet").handle_error(SimpleNamespace(runner=None))
 
-    def test_layer_name_arg_error(self):
-        """Test LayerNameArgError"""
-        error_msg = "Invalid layer name: test_layer"
-        error = LayerNameArgError(error_msg)
 
-        assert str(error) == error_msg
-        assert isinstance(error, BaseArgError)
+def test_handle_error_sets_exit_code():
+    environment = SimpleNamespace(runner=Mock(), process_exit_code=None)
+    with pytest.raises(ArgError):
+        ArgError("bad").handle_error(environment)
+    assert environment.process_exit_code == 1  # a run that stops itself must not exit 0
 
-    def test_tile_matrix_set_arg_error(self):
-        """Test TileMatrixSetArgError"""
-        error_msg = "Invalid tile matrix set: EPSG:9999"
-        error = TileMatrixSetArgError(error_msg)
 
-        assert str(error) == error_msg
-        assert isinstance(error, BaseArgError)
+def test_error_in_on_start_stops_a_real_run():
+    """runner.quit() called from inside a user greenlet used to be killed half-way (state left in cleanup,
+    the run went on with zero users until -t). A real LocalRunner must reach STOPPED with exit code 1."""
+    import gevent
+    from locust import User, constant, task
+    from locust.env import Environment
+    from locust.runners import STATE_STOPPED
 
-    def test_tile_matrix_arg_error(self):
-        """Test TileMatrixArgError"""
-        error_msg = "Invalid tile matrix: 99"
-        error = TileMatrixArgError(error_msg)
+    from utils.ogc import cached_capabilities
 
-        assert str(error) == error_msg
-        assert isinstance(error, BaseArgError)
+    class FailsAtStart(User):
+        wait_time = constant(1)
 
-    def test_feature_name_arg_error(self):
-        """Test FeatureNameArgError"""
-        error_msg = "Invalid feature name: test:feature"
-        error = FeatureNameArgError(error_msg)
+        def on_start(self):  # as wms/wmts/wfs do: the other users wait on the capabilities lock meanwhile
+            def unreachable():
+                gevent.sleep(0.01)
+                raise ConnectionError("refused")
 
-        assert str(error) == error_msg
-        assert isinstance(error, BaseArgError)
+            try:
+                cached_capabilities(("test", "http://unreachable"), unreachable)
+            except ConnectionError as e:
+                ArgError(f"Cannot read GetCapabilities: {e}").handle_error(self.environment)
+
+        @task
+        def nothing(self):
+            pass
+
+    env = Environment(user_classes=[FailsAtStart])
+    runner = env.create_local_runner()
+    runner.start(3, spawn_rate=3)
+    gevent.sleep(1)
+    assert runner.state == STATE_STOPPED
+    assert env.process_exit_code == 1

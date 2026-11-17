@@ -82,10 +82,26 @@ can also be set with the environment variable next to it.
 |`--caps-ratio`|`LOCUST_CAPS_RATIO`|Fraction of requests that are GetCapabilities|0|
 |`--random-seed`|`LOCUST_RANDOM_SEED`|Seed for the random bboxes|1640|
 
-GetCapabilities is read once per process. For CRSs with latitude/northing first (e.g. EPSG:4326) the bbox
+GetCapabilities is read once per process (all three services), even when many users start together. A layer
+without BoundingBoxes of its own uses its parent's, as WMS 1.3.0 defines. For CRSs with latitude/northing first (e.g. EPSG:4326) the bbox
 is sent in that axis order, as WMS 1.3.0 requires. A response that is not HTTP 200 with an image counts as
 a failure with a fixed message (`Connection error`, `Server Overload: HTTP 503`, `OGC Error: HTTP 400`,
 `HTTP 404`, `OGC Exception`, `Invalid content type: text/html`), so Locust groups them in one row each.
+
+### WFS options
+
+`wfs.py` sends GetFeature (up to 1000 features) for random bboxes inside the feature type's extent.
+
+|Option|Env variable|Description|Default|
+|:-----|:-----------|:----------|:------|
+|`--feature-name`|`LOCUST_FEATURE_NAME`|Feature type with namespace, e.g. `bag:pand`|first in GetCapabilities|
+|`--wfs-version`|`LOCUST_WFS_VERSION`|`1.0.0`, `1.1.0` or `2.0.0`|`2.0.0`|
+|`--bbox-area` / `--bbox-ratio`|`LOCUST_BBOX_AREA` / `LOCUST_BBOX_RATIO`|Bbox area in km2 and width/height ratio|100 / 1.0|
+|`--random-seed`|`LOCUST_RANDOM_SEED`|Seed for the random bboxes|1640|
+
+WFS 1.1.0 and 2.0.0 send the bbox with its CRS (`BBOX=lat,lon,lat,lon,urn:ogc:def:crs:EPSG::4326`); WFS 1.0.0
+has no CRS in BBOX, so the corners are sent in the feature type's own SRS. `main.py` lists the feature types of
+a WFS: `uv run python main.py https://.../wfs`.
 
 ### Authentication (WMS)
 
@@ -98,12 +114,19 @@ GetMap:
 |`--auth-password`|`LOCUST_AUTH_PASSWORD`|Basic auth password|
 
 Prefer the environment variables: command-line arguments are visible to other users in `ps`. The
-password never appears in the log, the HTML report or the CSV files.
+password never appears in the log, the HTML report, the CSV files or the web UI (the option is not shown
+there; set it through the environment or the command line).
 
 ```bash
 export LOCUST_AUTH_USER=... LOCUST_AUTH_PASSWORD=...
 uv run locust -f wms.py --headless --host https://example.org/protected/wms -u 5 -r 1 -t 2m
 ```
+
+### When a run stops by itself
+
+A wrong option (unknown layer, CRS or tile matrix, a bbox area of 0, a password without a user) or a
+service whose GetCapabilities cannot be read (unreachable host, HTTP 401) stops the run at once with a
+message in the log and **exit code 1**, so scripts and cron jobs see the failure.
 
 ## Comparing results across versions
 

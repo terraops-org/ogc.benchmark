@@ -1,237 +1,139 @@
-"""Integration tests for WFS benchmark"""
+"""Unit tests for wfs.py: feature type choice, WFS 2.0 bbox with its CRS, per-user streams, failures."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
+from urllib.parse import parse_qs, urlparse
+
+import gevent
 import pytest
-import responses
-from unittest.mock import Mock, patch
 from locust.env import Environment
 
+import wfs
+from exceptions import ArgError
+from utils import ogc
+from utils.ogc import default_options
 from wfs import WFSBenchmark
-from exceptions import LayerNameArgError
+
+WGS84 = (4.0, 52.0, 5.0, 53.0)  # lon/lat, as OWSLib reports boundingBoxWGS84
 
 
-class TestWFSBenchmark:
-    """Test WFS benchmark functionality"""
-
-    def setup_method(self):
-        """Setup test environment"""
-        self.env = Environment(user_classes=[WFSBenchmark])
-        self.env.create_local_runner()
-
-        # Create mock parsed options
-        self.env.parsed_options = Mock()
-        self.env.parsed_options.random_seed = 42
-        self.env.parsed_options.bbox_area = 100.0
-        self.env.parsed_options.bbox_ratio = 1.0
-        self.env.parsed_options.feature_name = None
-
-    @patch('wfs.WebFeatureService')
-    @patch('wfs.generate_random_bbox_degrees')
-    def test_on_start_success(self, mock_bbox_gen, mock_wfs):
-        """Test successful WFS initialization"""
-        # Mock WFS service
-        mock_service = Mock()
-        mock_service.contents = {
-            'feature1': Mock(),
-            'feature2': Mock()
-        }
-
-        # Mock feature properties
-        mock_feature = Mock()
-        mock_feature.crsOptions = ['EPSG:4326', 'EPSG:3857']
-        mock_feature.boundingBoxWGS84 = [-9.5, 36.8, -6.2, 42.2]
-        mock_service.contents = {'feature1': mock_feature}
-
-        mock_wfs.return_value = mock_service
-
-        # Mock bbox generator
-        mock_bbox_gen.return_value = iter([(-8.0, 37.0, -7.0, 38.0)])
-
-        user = WFSBenchmark(self.env)
-        user.host = "http://example.com/wfs"
-
-        # Should not raise exception
+def make_user(*args, contents=None, wgs84=WGS84):
+    ogc._CAPS.clear()
+    env = Environment(user_classes=[WFSBenchmark])
+    env.create_local_runner()
+    env.parsed_options = default_options(wfs.init_parser, *args)
+    feature = Mock()
+    feature.boundingBoxWGS84 = list(wgs84)  # OWSLib gives a list
+    feature.boundingBox = (*WGS84, "urn:ogc:def:crs:EPSG::28992")  # WFS 1.0.0: the LatLongBoundingBox degrees
+    feature.crsOptions = ["urn:ogc:def:crs:EPSG::28992"]
+    service = Mock()
+    service.contents = contents or {"ns:a": feature, "ns:b": feature}
+    user = WFSBenchmark(env)
+    user.host = "http://example.com/wfs"
+    with patch("wfs.WebFeatureService", return_value=service) as webfeatureservice:
         user.on_start()
+    user.webfeatureservice = webfeatureservice  # test-only handle on the OWSLib constructor call
+    user.client = MagicMock()
+    return user
 
-        # Verify service was initialized
-        mock_wfs.assert_called_once_with("http://example.com/wfs", parse_remote_metadata=False, version="2.0.0")
-        assert hasattr(user, 'wfs20')
-        assert hasattr(user, 'feature_names')
 
-    @patch('wfs.WebFeatureService')
-    def test_on_start_connection_failure(self, mock_wfs):
-        """Test handling of WFS connection failures"""
-        mock_wfs.side_effect = Exception("WFS connection failed")
+def fake_resp(status=200, ctype="text/xml; subtype=gml/3.2", content=b'<wfs:FeatureCollection numberReturned="3">'):
+    return SimpleNamespace(status_code=status, headers={"content-type": ctype}, content=content, failure=Mock())
 
-        user = WFSBenchmark(self.env)
-        user.host = "http://invalid.com/wfs"
 
-        with pytest.raises(Exception):
-            user.on_start()
+def run_features(user, resp=None):
+    """One load_features(); returns the GetFeature query parameters and the response it checked."""
+    resp = resp or fake_resp()
+    user.client.get.return_value.__enter__.return_value = resp
+    user.load_features()
+    return parse_qs(urlparse(user.client.get.call_args.args[0]).query), resp
 
-    @patch('wfs.WebFeatureService')
-    def test_invalid_feature_name(self, mock_wfs):
-        """Test error handling for invalid feature names"""
-        mock_service = Mock()
-        mock_service.contents = {'valid_feature': Mock()}
-        mock_wfs.return_value = mock_service
 
-        # Set invalid feature name
-        self.env.parsed_options.feature_name = "invalid_feature"
+def test_default_is_first_feature_type():
+    user = make_user()
+    assert user.feature_name == "ns:a"
+    assert user.extent == WGS84  # a tuple, whatever OWSLib hands over
 
-        user = WFSBenchmark(self.env)
-        user.host = "http://example.com/wfs"
 
-        with pytest.raises(LayerNameArgError):
-            user.on_start()
+def test_unknown_feature_raises():
+    with pytest.raises(ArgError):
+        make_user("--feature-name", "ns:nope")
 
-    def test_get_features(self):
-        """Test feature extraction"""
-        user = WFSBenchmark(self.env)
-        user.wfs20 = Mock()
-        user.wfs20.contents = {
-            'au:feature1': Mock(),
-            'au:feature2': Mock(),
-            'other:feature3': Mock()
-        }
 
-        features = user.get_features()
-        assert len(features) == 3
-        assert 'au:feature1' in features
-        assert 'au:feature2' in features
-        assert 'other:feature3' in features
+@pytest.mark.parametrize("version", ["1.1.0", "2.0.0"])
+def test_bbox_has_crs_suffix(version):
+    query, _ = run_features(make_user("--bbox-area", "1", "--wfs-version", version))
+    *values, crs = query["BBOX"][0].split(",")
+    lat1, lon1, lat2, lon2 = map(float, values)
+    assert crs == "urn:ogc:def:crs:EPSG::4326"  # WFS 2.0: latitude first for this CRS
+    assert 52.0 <= lat1 < lat2 <= 53.0 and 4.0 <= lon1 < lon2 <= 5.0
+    assert query["REQUEST"] == ["GetFeature"]
+    assert not any(key.lower() == "crs" for key in query)  # not a WFS GetFeature parameter
 
-    def test_get_crs(self):
-        """Test CRS extraction"""
-        user = WFSBenchmark(self.env)
-        user.feature = Mock()
-        user.feature.crsOptions = ['EPSG:4326', 'EPSG:3857']
 
-        crs = user.get_crs()
-        assert crs == 'EPSG:4326'
+def test_two_users_different_bboxes():
+    first, _ = run_features(make_user())
+    second, _ = run_features(make_user())
+    assert first["BBOX"] != second["BBOX"]
 
-    def test_get_crs_no_options(self):
-        """Test CRS extraction when no options available"""
-        user = WFSBenchmark(self.env)
-        user.feature = Mock()
-        user.feature.crsOptions = []
 
-        crs = user.get_crs()
-        assert crs == "No CRS available"
+def test_json_accepted():
+    _, resp = run_features(make_user(), fake_resp(200, "application/json", b'{"type": "FeatureCollection"}'))
+    resp.failure.assert_not_called()
 
-    def test_get_bbox(self):
-        """Test bounding box extraction"""
-        user = WFSBenchmark(self.env)
-        user.feature = Mock()
-        user.feature.boundingBoxWGS84 = [-9.5, 36.8, -6.2, 42.2]
 
-        bbox = user.get_bbox()
-        assert bbox == (-9.5, 36.8, -6.2, 42.2)
+def test_exception_message_stable():
+    body = b'<ows:ExceptionReport><ows:Exception exceptionCode="InvalidParameterValue">BBOX 1,2</ows:Exception>'
+    _, resp = run_features(make_user(), fake_resp(200, "text/xml", body))
+    resp.failure.assert_called_once_with("OGC Exception")
 
-    @responses.activate
-    @patch('wfs.WebFeatureService')
-    @patch('wfs.generate_random_bbox_degrees')
-    def test_load_features_success(self, mock_bbox_gen, mock_wfs):
-        """Test successful feature loading"""
-        # Setup mocked WFS service
-        self._setup_mock_wfs_service(mock_wfs, mock_bbox_gen)
 
-        # Mock successful GML response
-        gml_response = '''<?xml version="1.0" encoding="UTF-8"?>
-        <wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0">
-            <wfs:member>
-                <au:AdministrativeUnit>
-                    <au:geometry>...</au:geometry>
-                </au:AdministrativeUnit>
-            </wfs:member>
-        </wfs:FeatureCollection>'''
-
-        responses.add(
-            responses.GET,
-            "http://example.com/wfs",
-            body=gml_response,
-            status=200,
-            content_type="application/gml+xml"
-        )
-
-        user = WFSBenchmark(self.env)
-        user.host = "http://example.com/wfs"
+def test_connection_failure_stops_the_run():
+    ogc._CAPS.clear()
+    env = Environment(user_classes=[WFSBenchmark])
+    env.create_local_runner()
+    env.parsed_options = default_options(wfs.init_parser)
+    env.runner.quit = Mock()
+    user = WFSBenchmark(env)
+    user.host = "http://example.com/wfs"
+    with patch("wfs.WebFeatureService", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
         user.on_start()
+    gevent.sleep(0)  # quit() runs in its own greenlet
+    env.runner.quit.assert_called_once()
+    assert env.process_exit_code == 1
 
-        # Execute the task
-        user.load_features()
 
-        # Verify request was made
-        assert len(responses.calls) == 1
-        request_url = responses.calls[0].request.url
-        assert "SERVICE=WFS" in request_url
-        assert "REQUEST=GetFeature" in request_url
-
-    @responses.activate
-    @patch('wfs.WebFeatureService')
-    @patch('wfs.generate_random_bbox_degrees')
-    def test_load_features_json_response(self, mock_bbox_gen, mock_wfs):
-        """Test feature loading with JSON response"""
-        self._setup_mock_wfs_service(mock_wfs, mock_bbox_gen)
-
-        user = WFSBenchmark(self.env)
-        user.host = "http://example.com/wfs"
+def test_capabilities_fetched_once_per_process():
+    first = make_user()
+    user = WFSBenchmark(first.environment)
+    user.host = "http://example.com/wfs"
+    with patch("wfs.WebFeatureService") as service:
         user.on_start()
+    service.assert_not_called()
 
-        # Mock JSON response
-        with patch.object(user.client, 'get') as mock_get:
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.headers = {'content-type': 'application/json'}
-            mock_context = Mock()
-            mock_context.__enter__ = Mock(return_value=mock_response)
-            mock_context.__exit__ = Mock(return_value=None)
-            mock_get.return_value = mock_context
 
-            user.load_features()
+@pytest.mark.parametrize(
+    "version, typename, limit",
+    [("1.0.0", "TYPENAME", "MAXFEATURES"), ("1.1.0", "TYPENAME", "MAXFEATURES"), ("2.0.0", "TYPENAMES", "COUNT")],
+)
+def test_version_parameters(version, typename, limit):
+    user = make_user("--wfs-version", version)
+    query, _ = run_features(user)
+    assert query["VERSION"] == [version] and query[typename] == ["ns:a"] and query[limit] == ["1000"]
+    assert user.webfeatureservice.call_args.kwargs["version"] == version
 
-            # Verify success was recorded
-            mock_response.success.assert_called_once()
 
-    @responses.activate
-    @patch('wfs.WebFeatureService')
-    @patch('wfs.generate_random_bbox_degrees')
-    def test_load_features_wfs_exception(self, mock_bbox_gen, mock_wfs):
-        """Test handling of WFS exceptions"""
-        self._setup_mock_wfs_service(mock_wfs, mock_bbox_gen)
+def test_wfs_100_bbox_in_native_srs():
+    """WFS 1.0.0 has no CRS in BBOX: corners in the feature type's SRS (here RD metres), x/y. The extent comes
+    from boundingBox, because OWSLib 0.36 turns the 1.0.0 boundingBoxWGS84 into a point."""
+    point = (4.5, 52.5, 4.5000001, 52.5000001)
+    user = make_user("--wfs-version", "1.0.0", "--bbox-area", "1", wgs84=point)
+    assert user.extent == WGS84
+    query, _ = run_features(user)
+    x1, y1, x2, y2 = map(float, query["BBOX"][0].split(","))
+    assert 0 < x1 < x2 < 300000 and 300000 < y1 < y2 < 650000
 
-        user = WFSBenchmark(self.env)
-        user.host = "http://example.com/wfs"
-        user.on_start()
 
-        # Mock response with WFS exception
-        with patch.object(user.client, 'get') as mock_get:
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.headers = {'content-type': 'application/xml'}
-            mock_response.text = '<?xml version="1.0"?><ows:ExceptionReport><ows:Exception>Invalid BBOX</ows:Exception></ows:ExceptionReport>'
-            mock_context = Mock()
-            mock_context.__enter__ = Mock(return_value=mock_response)
-            mock_context.__exit__ = Mock(return_value=None)
-            mock_get.return_value = mock_context
-
-            user.load_features()
-
-            # Verify failure was recorded for WFS exception
-            mock_response.failure.assert_called_once()
-
-    def _setup_mock_wfs_service(self, mock_wfs, mock_bbox_gen):
-        """Helper method to setup mocked WFS service"""
-        mock_service = Mock()
-
-        # Mock feature
-        mock_feature = Mock()
-        mock_feature.crsOptions = ['EPSG:4326']
-        mock_feature.boundingBoxWGS84 = [-9.5, 36.8, -6.2, 42.2]
-
-        mock_service.contents = {'au:AdministrativeUnits': mock_feature}
-
-        mock_wfs.return_value = mock_service
-
-        # Mock bbox generator
-        mock_bbox_gen.return_value = iter([(-8.0, 37.0, -7.0, 38.0)])
-
-        return mock_service
+def test_unknown_wfs_version_refused():
+    with pytest.raises(SystemExit):
+        default_options(wfs.init_parser, "--wfs-version", "3.0.0")

@@ -1,202 +1,121 @@
-"""Live service tests using PDOK services - requires network access"""
+"""Live tests against public PDOK services (network required): real GetCapabilities and real requests.
+
+A test is skipped only when the service cannot be reached (connection error, timeout). Any other
+problem, an HTTP 404 or 500 included, fails it: a live test that cannot fail tests nothing.
+"""
+
+import re
 
 import pytest
+import requests
 from locust.env import Environment
-from unittest.mock import Mock
 
-from wmts import WMTSBenchmark
+import wfs
 import wms
+import wmts
+from exceptions import ArgError
+from utils import ogc
 from utils.ogc import default_options
-from wms import WMSBenchmark
-from wfs import WFSBenchmark
+
+PDOK_WMS = "https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0"
+PDOK_WMTS = "https://service.pdok.nl/lv/bgt/wmts/v1_0"
+PDOK_WFS = "https://service.pdok.nl/lv/bag/wfs/v2_0"
+UNREACHABLE = (requests.ConnectionError, requests.Timeout)
+
+pytestmark = [pytest.mark.network, pytest.mark.slow]
 
 
-@pytest.mark.network
-@pytest.mark.slow
-class TestPDOKLiveServices:
-    """Test against PDOK (Dutch government) OGC services - requires network access"""
-
-    def setup_method(self):
-        """Setup test environment for live tests"""
-        self.timeout = 30  # seconds
-
-        # PDOK service URLs
-        self.pdok_wms = "https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0"
-        self.pdok_wfs = "https://service.pdok.nl/lv/bag/wfs/v2_0"
-        self.pdok_wmts = "https://service.pdok.nl/lv/bgt/wmts/v1_0"
-
-    def test_pdok_wmts_capabilities(self):
-        """Test WMTS capabilities parsing with PDOK BGT service"""
-        env = Environment(user_classes=[WMTSBenchmark])
-        env.create_local_runner()
-
-        # Mock parsed options
-        env.parsed_options = Mock()
-        env.parsed_options.random_seed = 42
-        env.parsed_options.layer_name = None
-        env.parsed_options.tile_matrix_set = None
-        env.parsed_options.tile_matrix = None
-
-        user = WMTSBenchmark(env)
-        user.host = self.pdok_wmts
-
-        try:
-            # This should successfully parse capabilities
-            user.on_start()
-
-            # Verify basic properties were set
-            assert hasattr(user, "wmts")
-            assert hasattr(user, "layers")
-            assert len(user.layers) > 0
-            assert hasattr(user, "layer_name")
-            assert hasattr(user, "tile_matrix_set")
-            assert hasattr(user, "tile_matrix_value")
-
-            print(f"PDOK WMTS found {len(user.layers)} layers")
-            print(f"Selected layer: {user.layer_name}")
-            print(f"Selected tile matrix set: {user.tile_matrix_set}")
-
-        except Exception as e:
-            pytest.skip(f"PDOK WMTS service test failed: {e}")
-
-    def _wms_user(self, *args):
-        wms._CAPABILITIES.clear()
-        env = Environment(user_classes=[WMSBenchmark])
-        env.create_local_runner()
-        env.parsed_options = default_options(wms.init_parser, *args)
-        user = WMSBenchmark(env)
-        user.host = self.pdok_wms
-        return env, user
-
-    def test_pdok_wms_capabilities(self):
-        """GetCapabilities of the PDOK aerial photo WMS: layers found, an extent with a CRS picked."""
-        _, user = self._wms_user()
-        try:
-            user.on_start()
-        except OSError as e:  # requests' network errors are OSErrors; anything else is a real failure
-            pytest.skip(f"PDOK WMS unreachable: {e}")
-        assert user.layers
-        minx, miny, maxx, maxy, crs = user.extents[user.layer_names[0]]
-        assert minx < maxx and miny < maxy and crs
-
-    def test_pdok_wfs_capabilities(self):
-        """Test WFS capabilities parsing with PDOK BAG service"""
-        env = Environment(user_classes=[WFSBenchmark])
-        env.create_local_runner()
-
-        # Mock parsed options
-        env.parsed_options = Mock()
-        env.parsed_options.random_seed = 42
-        env.parsed_options.bbox_area = 10.0  # 10 km² (smaller for WFS)
-        env.parsed_options.bbox_ratio = 1.0
-        env.parsed_options.feature_name = None
-
-        user = WFSBenchmark(env)
-        user.host = self.pdok_wfs
-
-        try:
-            # This should successfully parse capabilities
-            user.on_start()
-
-            # Verify basic properties were set
-            assert hasattr(user, "wfs20")
-            assert hasattr(user, "feature_names")
-            assert len(user.feature_names) > 0
-            assert hasattr(user, "feature_name")
-            assert hasattr(user, "crs")
-            assert hasattr(user, "bbox_generator")
-
-            print(f"PDOK WFS found {len(user.feature_names)} features")
-            print(f"Selected feature: {user.feature_name}")
-            print(f"Feature CRS: {user.crs}")
-
-        except Exception as e:
-            pytest.skip(f"PDOK WFS service test failed: {e}")
-
-    def test_pdok_wmts_tile_request(self):
-        """Test actual tile request to PDOK WMTS service"""
-        env = Environment(user_classes=[WMTSBenchmark])
-        env.create_local_runner()
-
-        # Mock parsed options
-        env.parsed_options = Mock()
-        env.parsed_options.random_seed = 42
-        env.parsed_options.layer_name = None
-        env.parsed_options.tile_matrix_set = None
-        env.parsed_options.tile_matrix = None
-
-        user = WMTSBenchmark(env)
-        user.host = self.pdok_wmts
-
-        try:
-            user.on_start()
-
-            # Mock the client response to capture the request
-            request_made = False
-            original_get = user.client.get
-
-            def mock_get(*args, **kwargs):
-                nonlocal request_made
-                request_made = True
-                # Return a mock response context manager
-                from unittest.mock import Mock
-
-                mock_response = Mock()
-                mock_response.status_code = 200
-                mock_response.headers = {"content-type": "image/png"}
-                mock_context = Mock()
-                mock_context.__enter__ = Mock(return_value=mock_response)
-                mock_context.__exit__ = Mock(return_value=None)
-                return mock_context
-
-            user.client.get = mock_get
-
-            # Execute tile loading task
-            user.load_tile()
-
-            # Verify a request was made
-            assert request_made, "No tile request was made"
-
-            print("PDOK WMTS tile request successful")
-
-        except Exception as e:
-            pytest.skip(f"PDOK WMTS tile request test failed: {e}")
-
-    def test_pdok_wms_map_request(self):
-        """One real GetMap on Actueel_orthoHR: HTTP 200 with an image, counted as a success."""
-        env, user = self._wms_user("--layer-name", "Actueel_orthoHR", "--bbox-area", "1")
-        seen = []
-        env.events.request.add_listener(
-            lambda name, response, exception, **kw: seen.append((name, response.status_code, exception))
-        )
-        try:
-            user.on_start()
-        except OSError as e:
-            pytest.skip(f"PDOK WMS unreachable: {e}")
-        user.load_map()
-        assert seen == [("GetMap Actueel_orthoHR", 200, None)]
+def make_user(module, user_class, host, *args):
+    """A user of `user_class` on `host`, plus a list that collects (name, status, exception, content) per request."""
+    ogc._CAPS.clear()
+    env = Environment(user_classes=[user_class])
+    env.create_local_runner()
+    env.parsed_options = default_options(module.init_parser, *args)
+    seen = []
+    env.events.request.add_listener(
+        lambda name, response, exception, **kw: seen.append((name, response.status_code, exception, response.content))
+    )
+    user = user_class(env)
+    user.host = host
+    return user, seen
 
 
-@pytest.mark.network
-@pytest.mark.slow
-class TestPDOKServiceValidation:
-    """Validate PDOK service endpoints are accessible"""
+def start_or_skip(user):
+    """on_start(), skipping the test only when the service is unreachable (the cause of the ArgError)."""
+    try:
+        user.on_start()
+    except ArgError as error:
+        if isinstance(error.__context__, UNREACHABLE):
+            pytest.skip(f"{user.host} unreachable: {error.__context__}")
+        raise
 
-    def test_pdok_service_availability(self):
-        """Test that PDOK services are accessible"""
-        import requests
 
-        services = {
-            "PDOK WMS": "https://service.pdok.nl/kadaster/plu/wms/v1_0?request=getcapabilities&service=wms",
-            "PDOK WFS": "https://service.pdok.nl/lv/bag/wfs/v2_0?request=getCapabilities&service=WFS",
-            "PDOK WMTS": "https://service.pdok.nl/lv/bgt/wmts/v1_0?request=GetCapabilities&service=WMTS",
-        }
+def test_wmts_capabilities():
+    user, _ = make_user(wmts, wmts.WMTSBenchmark, PDOK_WMTS)
+    start_or_skip(user)
+    assert user.layers and user.tile_matrix_set and user.layer_width > 0 and user.layer_height > 0
 
-        for service_name, url in services.items():
-            try:
-                response = requests.get(url, timeout=10)
-                assert response.status_code == 200, f"{service_name} returned {response.status_code}"
-                assert "xml" in response.headers.get("content-type", "").lower(), f"{service_name} did not return XML"
-                print(f"✓ {service_name} is accessible")
-            except Exception as e:
-                pytest.skip(f"{service_name} is not accessible: {e}")
+
+def test_wmts_tile_request():
+    """One real GetTile: HTTP 200 with an image, counted as a success."""
+    user, seen = make_user(wmts, wmts.WMTSBenchmark, PDOK_WMTS)
+    start_or_skip(user)
+    user.load_tile()
+    ((name, status, exception, _),) = seen
+    assert (name, status, exception) == ("GetTile", 200, None)
+
+
+def test_wms_capabilities():
+    """The aerial photo WMS: layers found, an extent with a CRS picked."""
+    user, _ = make_user(wms, wms.WMSBenchmark, PDOK_WMS)
+    start_or_skip(user)
+    minx, miny, maxx, maxy, crs = user.extents[user.layer_names[0]]
+    assert user.layers and minx < maxx and miny < maxy and crs
+
+
+def test_wms_map_request():
+    """One real GetMap on Actueel_orthoHR: HTTP 200 with an image, counted as a success."""
+    user, seen = make_user(wms, wms.WMSBenchmark, PDOK_WMS, "--layer-name", "Actueel_orthoHR", "--bbox-area", "1")
+    start_or_skip(user)
+    user.load_map()
+    assert [(n, s, e) for n, s, e, _ in seen] == [("GetMap Actueel_orthoHR", 200, None)]
+
+
+def test_wfs_capabilities():
+    """PDOK BAG: feature types found, the first one has a lon/lat extent."""
+    user, _ = make_user(wfs, wfs.WFSBenchmark, PDOK_WFS)
+    start_or_skip(user)
+    minx, miny, maxx, maxy = user.extent
+    assert user.feature_names and -180 <= minx < maxx <= 180 and -90 <= miny < maxy <= 90
+
+
+@pytest.mark.parametrize("version", ["1.1.0", "2.0.0"])  # PDOK BAG does not offer WFS 1.0.0
+def test_wfs_features_returned(version):
+    """1 km2 of central Amsterdam: the GetFeature succeeds AND holds buildings (a CRS-less bbox found none)."""
+    user, seen = make_user(
+        wfs, wfs.WFSBenchmark, PDOK_WFS, "--feature-name", "bag:pand", "--bbox-area", "1", "--wfs-version", version
+    )
+    start_or_skip(user)
+    user.extent = (4.88, 52.36, 4.90, 52.38)
+    user.load_features()
+    ((_, status, exception, content),) = seen
+    assert (status, exception) == (200, None)
+    assert feature_count(content) > 0
+
+
+def feature_count(content):
+    """Features in a GetFeature response: numberReturned (2.0.0), numberOfFeatures (1.1.0, when present),
+    else the member elements (MapServer's 1.1.0 GML has no count attribute)."""
+    count = re.search(rb'number(?:Returned|OfFeatures)="(\d+)"', content)
+    return int(count.group(1)) if count else len(re.findall(rb"<(?:gml:featureMember|wfs:member)\b", content))
+
+
+@pytest.mark.parametrize("url", [PDOK_WMS + "?service=WMS", PDOK_WMTS + "?service=WMTS", PDOK_WFS + "?service=WFS"])
+def test_service_availability(url):
+    """Each service answers GetCapabilities with XML; one service failing does not hide the others."""
+    try:
+        response = requests.get(url + "&request=GetCapabilities", timeout=30)
+    except UNREACHABLE as error:
+        pytest.skip(f"unreachable: {error}")
+    assert response.status_code == 200
+    assert "xml" in response.headers.get("content-type", "").lower()

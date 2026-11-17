@@ -1,209 +1,115 @@
-"""Integration tests for WMTS benchmark"""
+"""Unit tests for wmts.py: layer / matrix set / matrix choice, tile ranges, per-user streams, failures."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
+from urllib.parse import parse_qs, urlparse
+
+import gevent
 import pytest
-import responses
-from unittest.mock import Mock, patch, MagicMock
 from locust.env import Environment
-from locust.exception import StopUser
 
+import wmts
+from exceptions import ArgError
+from utils import ogc
+from utils.ogc import default_options
 from wmts import WMTSBenchmark
-from exceptions import LayerNameArgError, TileMatrixSetArgError, TileMatrixArgError
+
+MATRICES = {"0": (1, 1), "1": (10, 20), "2": (100, 200)}  # id: (matrixwidth, matrixheight); middle is "1"
 
 
-class TestWMTSBenchmark:
-    """Test WMTS benchmark functionality"""
+def make_service():
+    layer = Mock()
+    layer.formats = ["image/png"]
+    layer.tilematrixsetlinks = {"EPSG:28992": Mock()}
+    matrices = {k: SimpleNamespace(matrixwidth=w, matrixheight=h) for k, (w, h) in MATRICES.items()}
+    service = Mock()
+    service.contents = {"a": layer}
+    service.tilematrixsets = {"EPSG:28992": SimpleNamespace(tilematrix=matrices)}
+    return service
 
-    def setup_method(self):
-        """Setup test environment"""
-        self.env = Environment(user_classes=[WMTSBenchmark])
-        self.env.create_local_runner()
 
-        # Create mock parsed options
-        self.env.parsed_options = Mock()
-        self.env.parsed_options.random_seed = 42
-        self.env.parsed_options.layer_name = None
-        self.env.parsed_options.tile_matrix_set = None
-        self.env.parsed_options.tile_matrix = None
-
-    def test_user_initialization(self):
-        """Test basic user initialization"""
-        user = WMTSBenchmark(self.env)
-        user.host = "http://example.com/wmts"
-
-        assert user.host == "http://example.com/wmts"
-        assert user.environment == self.env
-        assert hasattr(user, 'wait_time')
-
-    @patch('wmts.WebMapTileService')
-    def test_on_start_success(self, mock_wmts):
-        """Test successful on_start initialization"""
-        # Mock WMTS service
-        mock_service = Mock()
-        mock_service.contents = {
-            'layer1': Mock(),
-            'layer2': Mock()
-        }
-
-        # Mock layer with tile matrix sets
-        mock_layer = Mock()
-        mock_layer.tilematrixsets = ['EPSG:3857', 'EPSG:4326']
-        mock_service.contents = {'layer1': mock_layer}
-
-        # Mock tile matrix set
-        mock_tms = Mock()
-        mock_tms.tilematrix = {'05': Mock(), '06': Mock(), '07': Mock()}
-        mock_service.tilematrixsets = {'EPSG:3857': mock_tms}
-
-        # Mock tile matrix
-        mock_tm = Mock()
-        mock_tm.matrixwidth = 100
-        mock_tm.matrixheight = 100
-        mock_tms.tilematrix = {'07': mock_tm}
-
-        mock_wmts.return_value = mock_service
-
-        user = WMTSBenchmark(self.env)
-        user.host = "http://example.com/wmts"
-
-        # Should not raise exception
+def make_user(*args):
+    ogc._CAPS.clear()
+    env = Environment(user_classes=[WMTSBenchmark])
+    env.create_local_runner()
+    env.parsed_options = default_options(wmts.init_parser, *args)
+    user = WMTSBenchmark(env)
+    user.host = "http://example.com/wmts"
+    with patch("wmts.WebMapTileService", return_value=make_service()):
         user.on_start()
+    user.client = MagicMock()
+    return user
 
-        # Verify service was initialized
-        mock_wmts.assert_called_once_with("http://example.com/wmts")
-        assert hasattr(user, 'wmts')
-        assert hasattr(user, 'layers')
 
-    @patch('wmts.WebMapTileService')
-    def test_on_start_connection_failure(self, mock_wmts):
-        """Test handling of connection failures"""
-        mock_wmts.side_effect = Exception("Connection failed")
+def fake_resp(status=200, ctype="image/png", content=b"\x89PNG"):
+    return SimpleNamespace(status_code=status, headers={"content-type": ctype}, content=content, failure=Mock())
 
-        user = WMTSBenchmark(self.env)
-        user.host = "http://invalid.com/wmts"
 
-        with pytest.raises(Exception):
-            user.on_start()
+def run_tile(user, resp=None):
+    """One load_tile(); returns the GetTile query parameters and the response it checked."""
+    resp = resp or fake_resp()
+    user.client.get.return_value.__enter__.return_value = resp
+    user.load_tile()
+    return parse_qs(urlparse(user.client.get.call_args.args[0]).query), resp
 
-    @patch('wmts.WebMapTileService')
-    def test_invalid_layer_name(self, mock_wmts):
-        """Test error handling for invalid layer names"""
-        # Mock service with specific layers
-        mock_service = Mock()
-        mock_service.contents = {'valid_layer': Mock()}
-        mock_wmts.return_value = mock_service
 
-        # Set invalid layer name
-        self.env.parsed_options.layer_name = "invalid_layer"
+def tile(query):
+    return int(query["TILECOL"][0]), int(query["TILEROW"][0])
 
-        user = WMTSBenchmark(self.env)
-        user.host = "http://example.com/wmts"
 
-        with pytest.raises(LayerNameArgError):
-            user.on_start()
+def test_defaults_first_layer_set_and_middle_matrix():
+    user = make_user()
+    assert (user.layer_name, user.tile_matrix_set, user.tile_matrix_value) == ("a", "EPSG:28992", "1")
+    query, _ = run_tile(user)
+    assert query["LAYER"] == ["a"] and query["TILEMATRIXSET"] == ["EPSG:28992"] and query["TILEMATRIX"] == ["1"]
+    assert query["REQUEST"] == ["GetTile"] and query["FORMAT"] == ["image/png"]
 
-    @responses.activate
-    @patch('wmts.WebMapTileService')
-    def test_load_tile_success(self, mock_wmts):
-        """Test successful tile loading"""
-        # Setup mocked WMTS service
-        self._setup_mock_wmts_service(mock_wmts)
 
-        # Mock successful tile response
-        responses.add(
-            responses.GET,
-            "http://example.com/wmts",
-            body=b"fake_image_data",
-            status=200,
-            content_type="image/png"
-        )
+@pytest.mark.parametrize(
+    "args", [("--layer-name", "nope"), ("--tile-matrix-set", "EPSG:3857"), ("--tile-matrix", "9")], ids=str
+)
+def test_unknown_values_raise(args):
+    with pytest.raises(ArgError):
+        make_user(*args)
 
-        user = WMTSBenchmark(self.env)
-        user.host = "http://example.com/wmts"
+
+def test_tile_inside_matrix():
+    user = make_user("--tile-matrix", "2")
+    tiles = [tile(run_tile(user)[0]) for _ in range(100)]
+    assert all(0 <= col <= 99 and 0 <= row <= 199 for col, row in tiles)
+    assert len(set(tiles)) > 50  # really random, not one tile repeated
+
+
+def test_two_users_different_tiles():
+    first = tile(run_tile(make_user("--tile-matrix", "2"))[0])
+    second = tile(run_tile(make_user("--tile-matrix", "2"))[0])
+    assert first != second
+
+
+def test_failure_message_stable():
+    _, resp = run_tile(make_user(), fake_resp(503, "text/html", b"<html>busy</html>"))
+    resp.failure.assert_called_once_with("Server Overload: HTTP 503")
+
+
+def test_capabilities_failure_stops_the_run():
+    ogc._CAPS.clear()
+    env = Environment(user_classes=[WMTSBenchmark])
+    env.create_local_runner()
+    env.parsed_options = default_options(wmts.init_parser)
+    env.runner.quit = Mock()
+    user = WMTSBenchmark(env)
+    user.host = "http://example.com/wmts"
+    with patch("wmts.WebMapTileService", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
         user.on_start()
+    gevent.sleep(0)  # quit() runs in its own greenlet
+    env.runner.quit.assert_called_once()
+    assert env.process_exit_code == 1
 
-        # Execute the task
-        user.load_tile()
 
-        # Verify request was made
-        assert len(responses.calls) == 1
-
-    @responses.activate
-    @patch('wmts.WebMapTileService')
-    def test_load_tile_http_error(self, mock_wmts):
-        """Test handling of HTTP errors in tile loading"""
-        self._setup_mock_wmts_service(mock_wmts)
-
-        # Mock HTTP error response
-        responses.add(
-            responses.GET,
-            "http://example.com/wmts",
-            status=404
-        )
-
-        user = WMTSBenchmark(self.env)
-        user.host = "http://example.com/wmts"
+def test_capabilities_fetched_once_per_process():
+    first = make_user()
+    user = WMTSBenchmark(first.environment)
+    user.host = "http://example.com/wmts"
+    with patch("wmts.WebMapTileService") as service:
         user.on_start()
-
-        # Mock the client.get to capture catch_response behavior
-        with patch.object(user.client, 'get') as mock_get:
-            mock_response = Mock()
-            mock_response.status_code = 404
-            mock_response.reason = "Not Found"
-            mock_context = Mock()
-            mock_context.__enter__ = Mock(return_value=mock_response)
-            mock_context.__exit__ = Mock(return_value=None)
-            mock_get.return_value = mock_context
-
-            user.load_tile()
-
-            # Verify failure was recorded
-            mock_response.failure.assert_called_once()
-
-    @responses.activate
-    @patch('wmts.WebMapTileService')
-    def test_load_tile_invalid_content_type(self, mock_wmts):
-        """Test handling of invalid content types"""
-        self._setup_mock_wmts_service(mock_wmts)
-
-        user = WMTSBenchmark(self.env)
-        user.host = "http://example.com/wmts"
-        user.on_start()
-
-        # Mock response with invalid content type
-        with patch.object(user.client, 'get') as mock_get:
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.headers = {'content-type': 'text/html'}
-            mock_context = Mock()
-            mock_context.__enter__ = Mock(return_value=mock_response)
-            mock_context.__exit__ = Mock(return_value=None)
-            mock_get.return_value = mock_context
-
-            user.load_tile()
-
-            # Verify failure was recorded for invalid content type
-            mock_response.failure.assert_called_once()
-
-    def _setup_mock_wmts_service(self, mock_wmts):
-        """Helper method to setup mocked WMTS service"""
-        mock_service = Mock()
-
-        # Mock layer
-        mock_layer = Mock()
-        mock_layer.tilematrixsets = ['EPSG:3857']
-        mock_layer.styles = {'default': Mock()}
-        mock_layer.format = 'image/png'
-
-        mock_service.contents = {'test_layer': mock_layer}
-
-        # Mock tile matrix set
-        mock_tms = Mock()
-        mock_tm = Mock()
-        mock_tm.matrixwidth = 100
-        mock_tm.matrixheight = 100
-        mock_tms.tilematrix = {'07': mock_tm}
-
-        mock_service.tilematrixsets = {'EPSG:3857': mock_tms}
-
-        mock_wmts.return_value = mock_service
-
-        return mock_service
+    service.assert_not_called()

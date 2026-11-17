@@ -1,47 +1,19 @@
-import sys
 import logging
+
+import gevent
 
 logger = logging.getLogger(__name__)
 
 
-# Base class for all custom exceptions
-class BaseArgError(Exception):
-    """
-    Base class for handling argument errors in a consistent way.
-    It provides a method to log the error and stop the environment.
-    """
+class ArgError(Exception):
+    """A command-line option does not match what the service offers (layer, CRS, tile matrix, feature type)."""
 
     def handle_error(self, environment):
-        """
-        Handle the error by logging and stopping the environment.
-        """
-        logger.error(str(self))  # Log the error
-        environment.runner.quit()  # Gracefully stop the Locust runner if needed
-        sys.exit(str(self))  # Provide an error message and exit
-
-
-# Specific exception classes inheriting from BaseArgError
-class FeatureNameArgError(BaseArgError):
-    """Raised when there is an issue with a Feature name argument."""
-
-    pass
-
-
-class LayerNameArgError(BaseArgError):
-    """Raised when there is an issue with a Layer name argument."""
-
-    pass
-
-
-class TileMatrixSetArgError(BaseArgError):
-    """Raised when there is an issue with a TileMatrixSet argument."""
-
-    pass
-
-
-class TileMatrixArgError(BaseArgError):
-    """Raised when there is an issue with a TileMatrix argument."""
-
-    pass
-
-
+        """Log the message, stop the whole run (not only this simulated user), and re-raise."""
+        logger.error(str(self))
+        environment.process_exit_code = 1  # a run that stops itself must not report success
+        if environment.runner is not None:
+            # In its own greenlet: called from inside a user, quit() would kill its caller half-way
+            # (Locust stops the calling user too) and leave the runner in "cleanup" until -t runs out.
+            gevent.spawn(environment.runner.quit)
+        raise self
