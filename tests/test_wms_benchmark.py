@@ -1,5 +1,6 @@
 """Unit tests for wms.py: layer and CRS choice, bbox axis order, failures, options."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
@@ -35,8 +36,9 @@ def make_user(*args, layers=None):
     service.identification.title = "test service"
     user = WMSBenchmark(env)
     user.host = "http://example.com/wms"
-    with patch("wms.WebMapService", return_value=service):
+    with patch("wms.WebMapService", return_value=service) as webmapservice:
         user.on_start()
+    user.webmapservice = webmapservice  # test-only handle on the OWSLib constructor call
     user.client = MagicMock()
     return user
 
@@ -128,3 +130,26 @@ def test_caps_ratio_one_requests_capabilities():
     user.client.get.return_value.__enter__.return_value = fake_resp(200, "text/xml", b"<WMS_Capabilities/>")
     user.load_map()
     assert user.client.get.call_args.kwargs["name"] == "GetCapabilities"
+
+
+def test_basic_auth():
+    user = make_user("--layer-name", "a", "--auth-user", "u", "--auth-password", "p")
+    run_map(user)
+    assert user.client.get.call_args.kwargs["headers"]["Authorization"] == "Basic dTpw"
+    assert user.webmapservice.call_args.kwargs["auth"].username == "u"
+
+
+def test_no_auth_no_header():
+    user = make_user("--layer-name", "a")
+    assert "Authorization" not in user.headers
+
+
+def test_password_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    run_map(make_user("--layer-name", "a", "--auth-user", "u", "--auth-password", "p4ss-7f3a"))
+    assert "p4ss-7f3a" not in caplog.text
+
+
+def test_old_flags_gone():
+    with pytest.raises(SystemExit):
+        default_options(wms.init_parser, "--wms-user", "x")

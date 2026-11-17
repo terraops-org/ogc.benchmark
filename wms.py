@@ -2,7 +2,6 @@
 
 import logging
 import math
-import os
 from base64 import b64encode
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -94,17 +93,19 @@ def init_parser(parser):
         help="Fraction of requests that are GetCapabilities instead of GetMap, e.g. 0.001 (default 0).",
     )
     parser.add_argument(
-        "--wms-user",
+        "--auth-user",
         type=str,
-        default=os.getenv("WMS_USER", ""),
-        help="HTTP Basic Auth user (default: env WMS_USER)",
+        default="",
+        env_var="LOCUST_AUTH_USER",
+        help="HTTP basic auth user, for GetCapabilities and every request (default: none)",
     )
     parser.add_argument(
-        "--wms-password",
+        "--auth-password",
         type=str,
-        default=os.getenv("WMS_PASSWORD", ""),
+        default="",
+        env_var="LOCUST_AUTH_PASSWORD",
         is_secret=True,
-        help="HTTP Basic Auth password (default: env WMS_PASSWORD; prefer the env var, the command line is visible in ps)",
+        help="HTTP basic auth password; prefer the env var, the command line is visible in ps",
     )
 
 
@@ -138,11 +139,11 @@ class WMSBenchmark(FastHttpUser):
         """Read GetCapabilities (once per process), then pick layers, extents and this user's random stream."""
         opts = self.environment.parsed_options
         self.headers = {}
-        if opts.wms_user:
-            token = b64encode(f"{opts.wms_user}:{opts.wms_password}".encode()).decode()
+        if opts.auth_user:
+            token = b64encode(f"{opts.auth_user}:{opts.auth_password}".encode()).decode()
             self.headers["Authorization"] = f"Basic {token}"
 
-        first_user = (self.host, opts.wms_user) not in _CAPABILITIES
+        first_user = (self.host, opts.auth_user) not in _CAPABILITIES
         self.wms = self.get_wms(opts)
         self.layers = list(self.wms.contents)
 
@@ -171,9 +172,13 @@ class WMSBenchmark(FastHttpUser):
             logger.info(f"extents: {self.extents}")
 
     def get_wms(self, opts):
-        key = (self.host, opts.wms_user)
+        key = (self.host, opts.auth_user)
         if key not in _CAPABILITIES:
-            auth = Authentication(opts.wms_user, opts.wms_password) if opts.wms_user else None
+            auth = None
+            if opts.auth_user:
+                logger.info(f"basic auth as {opts.auth_user}")
+                logging.getLogger("owslib").setLevel(logging.WARNING)  # owslib's DEBUG lines may carry auth details
+                auth = Authentication(opts.auth_user, opts.auth_password)
             _CAPABILITIES[key] = WebMapService(self.host, version="1.3.0", auth=auth, timeout=120)
         return _CAPABILITIES[key]
 

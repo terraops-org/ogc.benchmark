@@ -87,6 +87,24 @@ is sent in that axis order, as WMS 1.3.0 requires. A response that is not HTTP 2
 a failure with a fixed message (`Connection error`, `Server Overload: HTTP 503`, `OGC Error: HTTP 400`,
 `HTTP 404`, `OGC Exception`, `Invalid content type: text/html`), so Locust groups them in one row each.
 
+### Authentication (WMS)
+
+For a WMS behind HTTP basic auth, `wms.py` sends the credentials with GetCapabilities and with every
+GetMap:
+
+|Option|Env variable|Description|
+|:-----|:-----------|:----------|
+|`--auth-user`|`LOCUST_AUTH_USER`|Basic auth user|
+|`--auth-password`|`LOCUST_AUTH_PASSWORD`|Basic auth password|
+
+Prefer the environment variables: command-line arguments are visible to other users in `ps`. The
+password never appears in the log, the HTML report or the CSV files.
+
+```bash
+export LOCUST_AUTH_USER=... LOCUST_AUTH_PASSWORD=...
+uv run locust -f wms.py --headless --host https://example.org/protected/wms -u 5 -r 1 -t 2m
+```
+
 ## Comparing results across versions
 
 Results compare only when the seed, the options and the tool version match. Since the move to
