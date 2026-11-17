@@ -7,6 +7,7 @@ This directory contains comprehensive tests for the OGC benchmark tools.
 ```
 tests/
 ├── __init__.py              # Test package init
+├── conftest.py              # gevent patch first, LOCUST_* env cleared
 ├── test_utils.py            # Unit tests for utility functions
 ├── test_wmts_benchmark.py   # Integration tests for WMTS benchmark
 ├── test_wms_benchmark.py    # Integration tests for WMS benchmark
@@ -32,77 +33,24 @@ tests/
 
 ## Running Tests
 
-### Quick Start with Click CLI
+Tests run in the uv environment (`uv sync` once, see the main README).
+
 ```bash
-# Install dependencies
-python run_tests.py install-deps
-# or: make install
-
-# Run all tests
-python run_tests.py test
-# or: make test
-
-# Quick validation (syntax + PDOK + fast tests)
-python run_tests.py test --fast
-# or: make validate
-```
-
-### Test Categories with Click
-```bash
-# Unit tests only
-python run_tests.py test --unit
-# or: make test-unit
-
-# Integration tests only
-python run_tests.py test --integration
-# or: make test-integration
-
-# Live PDOK service tests (requires network)
-python run_tests.py test --live
-# or: make test-live
-
-# Fast tests (skip slow and network)
-python run_tests.py test --fast
-# or: make test-fast
-
-# Coverage report
-python run_tests.py coverage --open
-# or: make coverage-open
-
-# Quick PDOK service check
-python run_tests.py pdok-check
-# or: make pdok-check
-```
-
-### Traditional PyTest (also available)
-```bash
-# Run all tests
-pytest
-
-# Unit tests only
-pytest -m "unit"
-
-# Integration tests only
-pytest -m "integration"
-
-# Skip network tests
-pytest -m "not network"
-
-# Run with coverage
-pytest --cov=. --cov-report=html
+make test        # unit tests, no network   (uv run pytest -m "not network")
+make test-live   # live PDOK services        (uv run pytest -m network)
+make coverage    # unit tests + coverage report in htmlcov/
 ```
 
 ### Run Individual Test Files
 ```bash
-# Test utilities
-pytest tests/test_utils.py
-
-# Test WMTS benchmark
-pytest tests/test_wmts_benchmark.py -v
-
-# Test with live PDOK services (requires network)
-pytest tests/test_live_services.py -m network
+uv run pytest tests/test_utils.py
+uv run pytest tests/test_wmts_benchmark.py -v
+uv run pytest tests/test_live_services.py -m network
 ```
+
+`conftest.py` patches gevent before any test module imports `requests` (on Python 3.14+ a late
+patch makes urllib3's SSL setup fail with RecursionError) and clears `LOCUST_*` environment
+variables so option defaults come from the code. pytest settings live in `pyproject.toml`.
 
 ## Test Features
 

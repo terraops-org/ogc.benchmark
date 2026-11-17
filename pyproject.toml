@@ -1,0 +1,35 @@
+[project]
+name = "ogc-benchmark"
+version = "0.1.0"
+description = "Load tests for OGC web services (WMS, WMTS, WFS) based on Locust"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "locust==2.47.0",
+    "owslib==0.36.0",
+    "pyproj==3.8.0",
+]
+
+[dependency-groups]
+dev = [
+    "black==26.10.1",
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "responses==0.26.3",
+]
+
+[tool.uv]
+# Flat locustfiles loaded by path, not an installable package.
+package = false
+
+[tool.black]
+line-length = 120
+target-version = ["py315"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "network: needs access to live services",
+    "slow: takes more than a few seconds",
+]

@@ -12,40 +12,16 @@ The benchmarking script, e.g., `wmts.py`, adapts Locust to specifically test OGC
 
 During tests, Locust will randomly request a tile (`GetTile`). The script supports random seed parameters to ensure reproducibility by generating a consistent sequence of random numbers.
 
-## pyenv virtualenv
+## Installation
 
-Instruction for pyenv install: [Install Multiple Python Versions for Specific Project](https://gist.github.com/trongnghia203/9cc8157acb1a9faad2de95c3175aa875)  
-
-pyenv virtual env install:
-
-```bash
-# pyenv python version install
-export PYENV_PYTHON_VERSION="3.12.10"
-export PYTHON_CONFIGURE_OPTS=" --enable-optimizations --with-lto"
-export CPPFLAGS="-march=native -O3" 
-export CXXFLAGS=${CFLAGS} 
-pyenv install -v $PYENV_PYTHON_VERSION
-
-pyenv virtualenv 3.12.10 ogc.benchmark
-pyenv local ogc.benchmark 
-pyenv shell ogc.benchmark
-pyenv which pip # check if paths/shims are correct
-#/home/mende012/.pyenv/versions/webservice.benchmark/bin/pip
-```
-
-## Install python packages
-
-requirements.txt file pins the necessary packages and version for script to run
+The project uses [uv](https://docs.astral.sh/uv/). It installs the Python version in `.python-version`
+(3.15) and the exact package versions in `uv.lock` into a local `.venv`:
 
 ```bash
-pip install -r requirements.txt
+uv sync          # or: make install
 ```
 
-And for development:
-
-```bash
-pip install -r requirements-dev.txt
-```
+Every command then runs through `uv run`, e.g. `uv run locust ...` (no virtualenv to activate).
 
 ## Commands (headless)
 
@@ -53,7 +29,7 @@ script `wmts.py` contains the code to test a WMTS webservice, it creates a locus
 
 ```bash
 # all configurations possible
-locust -f wmts.py --help
+uv run locust -f wmts.py --help
 ```
 
 In a nutshell:
@@ -76,10 +52,28 @@ In a nutshell:
 For example a full command would be like this:
 
 ```bash
-locust -f wmts.py --headless --host https://cartografia.dgterritorio.gov.pt/ortos2021/service  --random-seed 2129  -u 10 -r 1 -t 2m --layer-name Ortos2021-RGB  --tile-matrix-set "PTTM_06" --tile-matrix "07"  --html wmts.ortos2021.r1.u1.s1640.report.html --loglevel DEBUG --logfile wmts.ortos2021.r1.u1.s1640.log 2>&1 | tee wmts.ortos2021.r1.u1.s1640.txt
+uv run locust -f wmts.py --headless --host https://service.pdok.nl/hwh/luchtfotorgb/wmts/v1_0 --random-seed 2129 -u 10 -r 1 -t 2m --layer-name Actueel_orthoHR --html wmts.luchtfoto.r1.u10.s2129.report.html --loglevel DEBUG --logfile wmts.luchtfoto.r1.u10.s2129.log 2>&1 | tee wmts.luchtfoto.r1.u10.s2129.txt
 ```
 
-Note: `2>&1 | tee wmts.ortos2021.r1.u1.s1640.txt` will pipe bash consolte content to file `tee wmts.ortos2021.r1.u1.s1640.txt`
+Note: `2>&1 | tee wmts.luchtfoto.r1.u10.s2129.txt` copies the console output to that file.
+
+The same pattern runs the other services:
+
+```bash
+uv run locust -f wms.py --headless --host https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0 --layer-name Actueel_orthoHR -u 10 -r 1 -t 2m --html wms-report.html
+uv run locust -f wfs.py --headless --host https://service.pdok.nl/lv/bag/wfs/v2_0 --feature-name bag:pand -u 5 -r 1 -t 2m --html wfs-report.html
+```
+
+## Comparing results across versions
+
+Results compare only when the seed, the options and the tool version match. Since the move to
+Locust 2.47 and Python 3.15, older reports are not comparable with new ones:
+
+- Locust 2.43.4 changed the HTML report's req/s column from the current rate to the total rate.
+- Locust 2.46 fixed response-time percentiles that were reported too low.
+- Each simulated user now draws from its own random stream, so a seed gives other bboxes than before.
+
+To re-run the old behaviour, check out the tag `v2025.11-locust2.37`.
 
 ## DGT WMTS
 
@@ -100,42 +94,23 @@ List of URLs and layer information:
 
 ## Testing
 
-The project includes comprehensive pytest tests:
+Tests use pytest; tests that need live services are marked `network`.
 
 ```bash
-# Run all tests
-make test
+make test        # unit tests, no network   (uv run pytest -m "not network")
+make test-live   # live PDOK services        (uv run pytest -m network)
+make coverage    # unit tests + coverage report in htmlcov/
 
-# Run specific test types
-make test-unit         # Unit tests only
-make test-integration  # Integration tests only
-make test-live         # Live PDOK service tests (requires network)
-make test-fast         # Skip slow and network tests
-
-# Generate coverage report
-make coverage
-
-# Using pytest directly
-pytest                              # All tests
-pytest -m "unit"                    # Unit tests only
-pytest -m "not network"             # Skip network tests
-pytest tests/test_wmts_benchmark.py # Single test file
+uv run pytest tests/test_wmts_benchmark.py   # one test file
 ```
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
 ## Code lint
 
-Implemented [black](https://black.readthedocs.io/en/stable/index.html) linter
+Formatting with [black](https://black.readthedocs.io/en/stable/index.html) (line length 120, settings in
+`pyproject.toml`):
 
 ```bash
-❯ black --version
-black, 24.10.0 (compiled: yes)
-Python (CPython) 3.12.7
-```
-
-And then the followin black parameters:
-
-```bash
-black --safe --target-version=py312 --line-length 120 *.py
+make lint        # uv run black --line-length 120 *.py utils tests
 ```
