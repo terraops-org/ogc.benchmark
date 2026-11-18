@@ -164,3 +164,11 @@ def test_unreachable_host_stops_the_run():
     gevent.sleep(0)
     env.runner.quit.assert_called_once()
     assert env.process_exit_code == 1
+
+
+def test_user_agent_sent():
+    user = make_user()
+    run_features(user)
+    assert user.client.get.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }

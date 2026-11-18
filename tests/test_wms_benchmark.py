@@ -246,3 +246,20 @@ def test_password_not_in_web_ui():
     parser = LocustArgumentParser()
     wms.init_parser(parser)
     assert "auth_password" not in parser.args_included_in_web_ui  # the web UI page would carry its value
+
+
+def test_tls_not_verified_by_default():
+    assert make_user("--layer-name", "a").webmapservice.call_args.kwargs["auth"].verify is False
+    assert make_user("--layer-name", "a", "--verify-tls").webmapservice.call_args.kwargs["auth"].verify is True
+
+
+def test_user_agent_sent():
+    user = make_user("--layer-name", "a")
+    run_map(user)
+    assert (
+        user.client.get.call_args.kwargs["headers"]["User-Agent"]
+        == "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    )
+    assert user.webmapservice.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }

@@ -18,6 +18,8 @@ from utils.ogc import (
     cached_capabilities,
     check_response,
     default_options,
+    owslib_auth,
+    request_headers,
     user_rng,
     with_params,
 )  # noqa: E402
@@ -61,11 +63,18 @@ class WFSBenchmark(FastHttpUser):
     def on_start(self):
         """Read GetCapabilities, then pick the feature type, its WGS84 extent and this user's random stream."""
         opts = self.environment.parsed_options
+        self.headers = request_headers(opts)
         self.version = opts.wfs_version
         try:  # once per process; unreachable host or not a WFS: stop now instead of running with no users
             self.wfs20, _ = cached_capabilities(
                 ("wfs", self.host, self.version),
-                lambda: WebFeatureService(self.host, parse_remote_metadata=False, version=self.version),
+                lambda: WebFeatureService(
+                    self.host,
+                    parse_remote_metadata=False,
+                    version=self.version,
+                    auth=owslib_auth(opts),
+                    headers={"User-Agent": opts.user_agent},
+                ),
             )
         except Exception as e:
             ArgError(f"Cannot read the WFS GetCapabilities of {self.host}: {e}").handle_error(self.environment)
@@ -107,7 +116,7 @@ class WFSBenchmark(FastHttpUser):
         params = {"SERVICE": "WFS", "VERSION": self.version, "REQUEST": "GetFeature", typename: self.feature_name}
         url_path = with_params(self.host, {**params, "BBOX": bbox, limit: "1000"})
         logger.debug(f"URL for request: {url_path}")
-        with self.client.get(url_path, catch_response=True, name="GetFeature") as response:
+        with self.client.get(url_path, headers=self.headers, catch_response=True, name="GetFeature") as response:
             check_response(response, FEATURES)
 
 

@@ -167,3 +167,20 @@ def test_unreachable_host_stops_the_run():
     gevent.sleep(0)
     env.runner.quit.assert_called_once()
     assert env.process_exit_code == 1
+
+
+def test_tls_not_verified_by_default():
+    assert all(c.kwargs["verify"] is False for c in make_user().metadata_get.call_args_list)
+    assert all(c.kwargs["verify"] is True for c in make_user("--verify-tls").metadata_get.call_args_list)
+
+
+def test_user_agent_sent():
+    user = make_user()
+    run_map(user)
+    assert user.client.get.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }
+    assert all(
+        c.kwargs["headers"] == {"User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"}
+        for c in user.metadata_get.call_args_list
+    )

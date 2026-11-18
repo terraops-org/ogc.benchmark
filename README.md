@@ -213,6 +213,20 @@ export LOCUST_AUTH_USER=... LOCUST_AUTH_PASSWORD=...
 uv run locust -f wms.py --headless --host https://example.org/protected/wms -u 5 -r 1 -t 2m
 ```
 
+### TLS certificates
+
+Many test servers have certificate problems (self-signed, expired, wrong name), so certificates are **not
+checked** by default, neither for GetCapabilities and the OGC API metadata nor for the load requests (Locust's
+`FastHttpUser` does not check them either). The log says so at start. To check them, add `--verify-tls`
+(`LOCUST_VERIFY_TLS=true`); a bad certificate then stops the run at start-up with exit code 1. Without the check,
+credentials sent with `--auth-user` / `--auth-password` are only as safe as the network path to the server.
+
+### User-Agent
+
+Every request (GetCapabilities, the OGC API metadata, the WMTS probe and all load requests) sends
+`User-Agent: ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)`, so server operators can
+recognise and filter benchmark traffic. Change it with `--user-agent` (`LOCUST_USER_AGENT`).
+
 ### When a run stops by itself
 
 A wrong option (unknown layer, CRS or tile matrix, a bbox area of 0, a password without a user, an `--extent`

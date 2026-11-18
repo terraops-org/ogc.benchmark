@@ -33,3 +33,5 @@ markers = [
     "network: needs access to live services",
     "slow: takes more than a few seconds",
 ]
+# certificates are not checked by default (--verify-tls); pytest resets the filter utils/ogc.py sets
+filterwarnings = ["ignore:Unverified HTTPS request"]  # by message: naming the class would import urllib3 before gevent patches

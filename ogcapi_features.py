@@ -16,13 +16,13 @@ from utils.ogc import (  # noqa: E402
     add_auth_args,
     add_common_args,
     add_extent_arg,
-    auth_header,
     check_response,
     default_options,
     is_geographic,
     is_metric,
     is_yx,
     mark_empty,
+    request_headers,
     user_rng,
     with_params,
 )
@@ -91,7 +91,7 @@ class OGCAPIFeaturesBenchmark(FastHttpUser):
                 f"--limit ({opts.limit}), --bbox-area ({opts.bbox_area}) and --bbox-ratio ({opts.bbox_ratio}) "
                 "must be greater than 0"
             ).handle_error(self.environment)
-        self.headers = auth_header(opts)
+        self.headers = request_headers(opts)
         try:
             self.setup(opts)
         except ValueError as e:  # a wrong option or metadata the benchmark cannot use
@@ -103,7 +103,7 @@ class OGCAPIFeaturesBenchmark(FastHttpUser):
 
     def setup(self, opts):
         """Set collection, items URL, CRS and area (in that CRS); ValueError if unusable."""
-        col = pick_collection(collections(self.host, self.headers), opts.collection, "items")
+        col = pick_collection(collections(self.host, self.headers, opts.verify_tls), opts.collection, "items")
         self.collection = col["id"]
         self.items_url = link(col, "items", "application/geo+json") or link(col, "items")
         self.crs = crs_uri(opts.crs) if opts.crs else CRS84

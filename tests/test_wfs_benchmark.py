@@ -137,3 +137,20 @@ def test_wfs_100_bbox_in_native_srs():
 def test_unknown_wfs_version_refused():
     with pytest.raises(SystemExit):
         default_options(wfs.init_parser, "--wfs-version", "3.0.0")
+
+
+def test_tls_not_verified_by_default():
+    assert make_user().webfeatureservice.call_args.kwargs["auth"].verify is False
+    assert make_user("--verify-tls").webfeatureservice.call_args.kwargs["auth"].verify is True
+
+
+def test_user_agent_sent():
+    user = make_user()
+    run_features(user)
+    assert (
+        user.client.get.call_args.kwargs["headers"]["User-Agent"]
+        == "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    )
+    assert user.webfeatureservice.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }

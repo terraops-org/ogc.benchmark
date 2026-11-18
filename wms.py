@@ -5,7 +5,6 @@ import math
 
 from exceptions import ArgError
 from locust import FastHttpUser, between, constant_throughput, events, task
-from owslib.util import Authentication
 from owslib.wms import WebMapService
 
 from utils.ogc import (
@@ -14,7 +13,6 @@ from utils.ogc import (
     add_auth_args,
     add_common_args,
     add_map_args,
-    auth_header,
     bbox_areas,
     cached_capabilities,
     check_response,
@@ -22,6 +20,8 @@ from utils.ogc import (
     is_geographic,
     is_metric,
     is_yx,
+    owslib_auth,
+    request_headers,
     user_rng,
     with_params,
 )
@@ -116,7 +116,7 @@ class WMSBenchmark(FastHttpUser):
         """Check the options, read GetCapabilities (once per process), then pick layers, extents and a random stream."""
         opts = self.environment.parsed_options
         self.areas, mix = self.check_options(opts)
-        self.headers = auth_header(opts)
+        self.headers = request_headers(opts)
 
         self.wms, first_user = self.get_wms(opts)
         self.layers = list(self.wms.contents)
@@ -168,12 +168,16 @@ class WMSBenchmark(FastHttpUser):
         """(WebMapService, fetched_now): GetCapabilities once per process; a failure stops the whole run."""
 
         def fetch():
-            auth = None
             if opts.auth_user:
                 logger.info(f"basic auth as {opts.auth_user}")
                 logging.getLogger("owslib").setLevel(logging.WARNING)  # owslib's DEBUG lines may carry auth details
-                auth = Authentication(opts.auth_user, opts.auth_password)
-            return WebMapService(self.host, version="1.3.0", auth=auth, timeout=120)
+            return WebMapService(
+                self.host,
+                version="1.3.0",
+                auth=owslib_auth(opts),
+                headers={"User-Agent": opts.user_agent},
+                timeout=120,
+            )
 
         try:
             return cached_capabilities(("wms", self.host, opts.auth_user), fetch)

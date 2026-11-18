@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from locust import FastHttpUser
+from locust.argument_parser import LocustArgumentParser
 
 from utils import ogc
 import gevent
@@ -13,6 +15,9 @@ from utils.ogc import (
     CAPABILITIES,
     FEATURES,
     IMAGE,
+    USER_AGENT,
+    add_common_args,
+    apply_verify_tls,
     auth_header,
     bbox_areas,
     cached_capabilities,
@@ -22,6 +27,8 @@ from utils.ogc import (
     is_metric,
     is_yx,
     mark_empty,
+    owslib_auth,
+    request_headers,
     parse_extent,
     user_rng,
 )
@@ -189,3 +196,50 @@ def test_bbox_areas():
     assert bbox_areas(SimpleNamespace(bbox_areas="", bbox_area=50.0)) == [50.0]
     with pytest.raises(ValueError, match="--bbox-areas must be km2 numbers"):
         bbox_areas(SimpleNamespace(bbox_areas="a", bbox_area=100.0))
+
+
+def test_verify_tls_off_by_default(monkeypatch):
+    parser = LocustArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).verify_tls is False
+    assert parser.parse_args(["--verify-tls"]).verify_tls is True
+    monkeypatch.setenv("LOCUST_VERIFY_TLS", "true")
+    assert parser.parse_args([]).verify_tls is True
+
+
+def test_apply_verify_tls_turns_locust_checks_on():
+    class Checked(FastHttpUser):
+        host = "https://example.com"
+
+    class Unchecked(FastHttpUser):
+        host = "https://example.com"
+
+    apply_verify_tls(SimpleNamespace(parsed_options=SimpleNamespace(verify_tls=True), user_classes=[Checked]))
+    apply_verify_tls(SimpleNamespace(parsed_options=SimpleNamespace(verify_tls=False), user_classes=[Unchecked]))
+    assert Checked.insecure is False and Unchecked.insecure is True
+
+
+def test_owslib_auth():
+    auth = owslib_auth(SimpleNamespace(auth_user="", auth_password="", verify_tls=False))
+    assert auth.verify is False and auth.username is None
+    auth = owslib_auth(SimpleNamespace(auth_user="u", auth_password="p", verify_tls=True))
+    assert (auth.username, auth.password, auth.verify) == ("u", "p", True)
+
+
+def test_user_agent_default_and_override():
+    parser = LocustArgumentParser()
+    add_common_args(parser)
+    assert (
+        parser.parse_args([]).user_agent
+        == USER_AGENT
+        == "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    )
+    assert parser.parse_args(["--user-agent", "probe/1"]).user_agent == "probe/1"
+
+
+def test_request_headers():
+    opts = SimpleNamespace(user_agent="probe/1", auth_user="", auth_password="")
+    assert request_headers(opts) == {"User-Agent": "probe/1"}
+    opts = SimpleNamespace(user_agent="probe/1", auth_user="u", auth_password="p")
+    assert request_headers(opts) == {"User-Agent": "probe/1", "Authorization": "Basic dTpw"}
+    assert request_headers(SimpleNamespace(user_agent="probe/1")) == {"User-Agent": "probe/1"}  # no auth options

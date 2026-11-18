@@ -20,6 +20,8 @@ from utils.ogc import (
     is_geographic,
     is_metric,
     mark_empty,
+    owslib_auth,
+    request_headers,
     parse_extent,
     user_rng,
 )
@@ -64,8 +66,13 @@ class WMTSBenchmark(FastHttpUser):
     def on_start(self):
         """Read GetCapabilities, then pick layer, TileMatrixSet, TileMatrix and this user's random stream."""
         opts = self.environment.parsed_options
+        self.verify = opts.verify_tls
+        self.headers = request_headers(opts)
         try:  # once per process; unreachable host or not a WMTS: stop now instead of running with no users
-            self.wmts, _ = cached_capabilities(("wmts", self.host), lambda: WebMapTileService(self.host))
+            self.wmts, _ = cached_capabilities(
+                ("wmts", self.host),
+                lambda: WebMapTileService(self.host, auth=owslib_auth(opts), headers={"User-Agent": opts.user_agent}),
+            )
         except Exception as e:
             ArgError(f"Cannot read the WMTS GetCapabilities of {self.host}: {e}").handle_error(self.environment)
 
@@ -169,7 +176,7 @@ class WMTSBenchmark(FastHttpUser):
 
     def probe_fetch(self, level):
         def fetch(col, row):
-            resp = requests.get(self.tile_url(level.id, row, col), timeout=60)
+            resp = requests.get(self.tile_url(level.id, row, col), headers=self.headers, timeout=60, verify=self.verify)
             return resp.status_code, resp.content
 
         return fetch
@@ -187,7 +194,7 @@ class WMTSBenchmark(FastHttpUser):
         """A GetTile (KVP) for a random tile where the layer has images; anything but a 200 image is a failure."""
         tile_col, tile_row = draw_tile(self.rng, self.target, self.area, self.coverage)
         url_path = self.tile_url(self.tile_matrix_value, tile_row, tile_col)
-        with self.client.get(url_path, catch_response=True, name="GetTile") as response:
+        with self.client.get(url_path, headers=self.headers, catch_response=True, name="GetTile") as response:
             if check_response(response, IMAGE) and self.coverage.blank == digest(response.content or b""):
                 mark_empty(response)
 

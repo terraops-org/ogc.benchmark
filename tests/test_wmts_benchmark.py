@@ -70,8 +70,12 @@ def make_user(*args, limits=None, probe=None):
     user = WMTSBenchmark(env)
     user.host = "http://example.com/wmts"
     user.probe_get = probe or probe_answer()
-    with patch("wmts.WebMapTileService", return_value=make_service(limits)), patch("wmts.requests.get", user.probe_get):
+    with (
+        patch("wmts.WebMapTileService", return_value=make_service(limits)) as ctor,
+        patch("wmts.requests.get", user.probe_get),
+    ):
         user.on_start()
+    user.wmts_ctor = ctor  # test-only handle on the OWSLib constructor call
     user.client = MagicMock()
     return user
 
@@ -205,3 +209,28 @@ def test_tile_matrix_limits_used_when_advertised():
     user = make_user("--tile-matrix", "2", limits=limits)
     tiles = [tile(run_tile(user)[0]) for _ in range(50)]
     assert all(4 <= col <= 5 and 2 <= row <= 3 for col, row in tiles)
+
+
+def test_tls_not_verified_by_default():
+    user = make_user()
+    assert user.wmts_ctor.call_args.kwargs["auth"].verify is False
+    assert all(c.kwargs["verify"] is False for c in user.probe_get.call_args_list)
+    user = make_user("--verify-tls")
+    assert user.wmts_ctor.call_args.kwargs["auth"].verify is True
+    assert all(c.kwargs["verify"] is True for c in user.probe_get.call_args_list)
+
+
+def test_user_agent_sent():
+    user = make_user()
+    run_tile(user)
+    assert (
+        user.client.get.call_args.kwargs["headers"]["User-Agent"]
+        == "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    )
+    assert user.wmts_ctor.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }
+    assert all(
+        c.kwargs["headers"]["User-Agent"] == "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+        for c in user.probe_get.call_args_list
+    )

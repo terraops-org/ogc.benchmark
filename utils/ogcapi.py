@@ -18,20 +18,20 @@ def crs_uri(code):
     return f"http://www.opengis.net/def/crs/{authority.upper()}/0/{number.lstrip(':')}"
 
 
-def cached_json(url, headers):
+def cached_json(url, headers, verify=False):
     """The JSON document at url (?f=json added), fetched once per process per url and credentials."""
 
     def fetch():
-        resp = requests.get(with_params(url, {"f": "json"}), headers=headers, timeout=120)
+        resp = requests.get(with_params(url, {"f": "json"}), headers=headers, timeout=120, verify=verify)
         resp.raise_for_status()
         return resp.json()
 
     return cached_capabilities(("json", url, headers.get("Authorization")), fetch)[0]
 
 
-def collections(host, headers):
+def collections(host, headers, verify=False):
     """The service's collections (the /collections document)."""
-    return cached_json(f"{host.rstrip('/')}/collections", headers)["collections"]
+    return cached_json(f"{host.rstrip('/')}/collections", headers, verify)["collections"]
 
 
 def link(obj, rel, type_prefix=""):

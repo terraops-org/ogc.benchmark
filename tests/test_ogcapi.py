@@ -105,3 +105,12 @@ def test_lonlat_area():
     assert lonlat_area(broken, "-10,38,-9,39") == (-10.0, 38.0, -9.0, 39.0)  # --extent alone bounds the test
     with pytest.raises(ValueError, match="'b'"):
         lonlat_area(broken, "")
+
+
+def test_cached_json_verify():
+    get = json_get({"ok": 1})
+    with patch("utils.ogcapi.requests.get", get):
+        cached_json("https://x/a", {})
+        assert get.call_args.kwargs["verify"] is False  # TLS certificates are not checked by default
+        cached_json("https://x/b", {}, verify=True)
+        assert get.call_args.kwargs["verify"] is True

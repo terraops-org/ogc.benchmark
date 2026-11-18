@@ -206,9 +206,13 @@ def test_extent_outside_refused():
 
 def test_auth_header_sent():
     user = make_user("--auth-user", "u", "--auth-password", "p")
-    assert all(c.kwargs["headers"] == {"Authorization": "Basic dTpw"} for c in user.metadata_get.call_args_list)
+    sent = {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)",
+        "Authorization": "Basic dTpw",
+    }
+    assert all(c.kwargs["headers"] == sent for c in user.metadata_get.call_args_list)
     run_tile(user)
-    assert user.client.get.call_args.kwargs["headers"] == {"Authorization": "Basic dTpw"}
+    assert user.client.get.call_args.kwargs["headers"] == sent
 
 
 def test_unreachable_host_stops_the_run():
@@ -233,3 +237,8 @@ def test_metadata_fetched_once_per_process():
     with patch("utils.ogcapi.requests.get") as get:
         user.on_start()
     get.assert_not_called()
+
+
+def test_tls_not_verified_by_default():
+    assert all(c.kwargs["verify"] is False for c in make_user().metadata_get.call_args_list)
+    assert all(c.kwargs["verify"] is True for c in make_user("--verify-tls").metadata_get.call_args_list)

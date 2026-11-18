@@ -14,10 +14,10 @@ from utils.ogc import (  # noqa: E402
     add_auth_args,
     add_common_args,
     add_extent_arg,
-    auth_header,
     check_response,
     default_options,
     mark_empty,
+    request_headers,
     user_rng,
 )
 from utils.ogcapi import MVT, cached_json, collections, link, lonlat_area, pick_collection  # noqa: E402
@@ -72,7 +72,7 @@ class OGCAPITilesBenchmark(FastHttpUser):
         opts = self.environment.parsed_options
         if opts.auth_password and not opts.auth_user:
             ArgError("--auth-password is set but --auth-user is not").handle_error(self.environment)
-        self.headers = auth_header(opts)
+        self.headers = request_headers(opts)
         try:
             self.setup(opts)
         except ValueError as e:  # a wrong option or metadata the benchmark cannot use
@@ -87,9 +87,9 @@ class OGCAPITilesBenchmark(FastHttpUser):
 
     def setup(self, opts):
         """Set collection, tile matrix set, target level, URL template and tile range; ValueError if unusable."""
-        col = pick_collection(collections(self.host, self.headers), opts.collection, "tilesets-vector")
+        col = pick_collection(collections(self.host, self.headers, opts.verify_tls), opts.collection, "tilesets-vector")
         self.collection = col["id"]
-        tilesets = cached_json(link(col, "tilesets-vector"), self.headers)["tilesets"]
+        tilesets = cached_json(link(col, "tilesets-vector"), self.headers, opts.verify_tls)["tilesets"]
         ids = [tms_id(ts) for ts in tilesets]
         self.tile_matrix_set = opts.tile_matrix_set or ids[0]
         if self.tile_matrix_set not in ids:
@@ -97,13 +97,15 @@ class OGCAPITilesBenchmark(FastHttpUser):
         tileset_ref = tilesets[ids.index(self.tile_matrix_set)]
         if tileset_ref.get("dataType", "vector") != "vector":
             raise ValueError(f"Tileset {self.tile_matrix_set}: only vector tilesets are supported")
-        tileset = cached_json(link(tileset_ref, "self", "application/json") or link(tileset_ref, "self"), self.headers)
+        tileset = cached_json(
+            link(tileset_ref, "self", "application/json") or link(tileset_ref, "self"), self.headers, opts.verify_tls
+        )
         self.template = link(tileset, "item", MVT[0]) or link(tileset, "item")
         if not self.template:
             raise ValueError(f"Tileset {self.tile_matrix_set} of '{self.collection}' has no tile URL template")
 
         tms_url = link(tileset, "tiling-scheme") or f"{self.host.rstrip('/')}/TileMatrixSets/{self.tile_matrix_set}"
-        tms = cached_json(tms_url, self.headers)
+        tms = cached_json(tms_url, self.headers, opts.verify_tls)
         crs = tms["crs"]["uri"] if isinstance(tms["crs"], dict) else tms["crs"]
         levels = [tms_matrix(level, crs) for level in tms["tileMatrices"]]
         ids = [m.id for m in levels]

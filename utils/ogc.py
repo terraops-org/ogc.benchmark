@@ -1,14 +1,18 @@
 """What the locustfiles share: response checks, CRS facts, shared options, per-user random streams."""
 
 import itertools
+import logging
 import random
 from base64 import b64encode
 from functools import lru_cache
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+import urllib3
 from gevent.lock import BoundedSemaphore
 
+from locust import events
 from locust.argument_parser import LocustArgumentParser
+from owslib.util import Authentication
 from pyproj import CRS
 from pyproj.exceptions import CRSError
 
@@ -19,6 +23,10 @@ FEATURES = CAPABILITIES + ("application/gml+xml", "application/json", "applicati
 _USER_IDS = itertools.count()  # one number per simulated user in this process
 _CAPS = {}  # parsed GetCapabilities per (service, host, ...) key, once per process
 _CAPS_LOCK = BoundedSemaphore()  # users spawned together wait for the first fetch instead of repeating it
+logger = logging.getLogger(__name__)
+USER_AGENT = "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"  # on every request
+# TLS certificates are not checked by default (--verify-tls): one warning per request would flood the log
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def check_response(resp, accept, empty_ok=False):
@@ -98,6 +106,20 @@ def add_common_args(parser, bbox=True):
         env_var="LOCUST_RANDOM_SEED",
         help="Seed for the random requests: the same seed replays the same requests (default 1640)",
     )
+    parser.add_argument(
+        "--verify-tls",
+        action="store_true",
+        default=False,
+        env_var="LOCUST_VERIFY_TLS",
+        help="Check the servers' TLS certificates (default: not checked, test servers often have bad certificates)",
+    )
+    parser.add_argument(
+        "--user-agent",
+        type=str,
+        default=USER_AGENT,
+        env_var="LOCUST_USER_AGENT",
+        help=f"User-Agent of every request, so server operators can tell benchmark traffic apart (default: {USER_AGENT})",
+    )
     if bbox:
         parser.add_argument(
             "--bbox-area",
@@ -136,9 +158,14 @@ def add_auth_args(parser):
 
 def auth_header(opts):
     """{"Authorization": "Basic ..."} for --auth-user / --auth-password, or {} without a user."""
-    if not opts.auth_user:
+    if not getattr(opts, "auth_user", ""):
         return {}
     return {"Authorization": "Basic " + b64encode(f"{opts.auth_user}:{opts.auth_password}".encode()).decode()}
+
+
+def request_headers(opts):
+    """The headers of every request: the benchmark's User-Agent, plus basic auth when --auth-user is set."""
+    return {"User-Agent": getattr(opts, "user_agent", USER_AGENT), **auth_header(opts)}
 
 
 def add_extent_arg(parser):
@@ -210,6 +237,26 @@ def bbox_areas(opts):
         return [float(a) for a in opts.bbox_areas.split(",")]
     except ValueError:
         raise ValueError(f"--bbox-areas must be km2 numbers, e.g. '1,10,100', got '{opts.bbox_areas}'") from None
+
+
+@events.init.add_listener
+def apply_verify_tls(environment, **kwargs):
+    """--verify-tls: let Locust check certificates too (FastHttpUser does not by default); log when nothing is."""
+    opts = environment.parsed_options
+    if opts is None:
+        return
+    if getattr(opts, "verify_tls", False):
+        for user_class in environment.user_classes:
+            user_class.insecure = False
+    else:
+        logger.info("TLS certificates are not checked (--verify-tls checks them)")
+
+
+def owslib_auth(opts):
+    """OWSLib Authentication: basic auth when --auth-user is set, certificate checks only with --verify-tls."""
+    user = getattr(opts, "auth_user", "") or None
+    password = getattr(opts, "auth_password", "") or None
+    return Authentication(user, password, verify=getattr(opts, "verify_tls", False))
 
 
 def with_params(host, params):

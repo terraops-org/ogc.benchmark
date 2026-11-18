@@ -18,7 +18,6 @@ from utils.ogc import (  # noqa: E402
     add_common_args,
     add_extent_arg,
     add_map_args,
-    auth_header,
     bbox_areas,
     cached_capabilities,
     check_response,
@@ -27,6 +26,7 @@ from utils.ogc import (  # noqa: E402
     is_metric,
     is_yx,
     mark_empty,
+    request_headers,
     user_rng,
     with_params,
 )
@@ -88,7 +88,7 @@ class OGCAPIMapsBenchmark(FastHttpUser):
             )
         if opts.auth_password and not opts.auth_user:
             ArgError("--auth-password is set but --auth-user is not").handle_error(self.environment)
-        self.headers = auth_header(opts)
+        self.headers = request_headers(opts)
         try:
             self.setup(opts)
         except ValueError as e:  # a wrong option or metadata the benchmark cannot use
@@ -107,7 +107,7 @@ class OGCAPIMapsBenchmark(FastHttpUser):
 
     def setup(self, opts):
         """Set collection, map URL, CRS and area (in that CRS); ValueError if unusable."""
-        col = pick_collection(collections(self.host, self.headers), opts.collection, "map")
+        col = pick_collection(collections(self.host, self.headers, opts.verify_tls), opts.collection, "map")
         self.collection = col["id"]
         self.map_url = link(col, "map", "image/png") or link(col, "map")
         self.crs = crs_uri(opts.crs) if opts.crs else CRS84
@@ -136,7 +136,12 @@ class OGCAPIMapsBenchmark(FastHttpUser):
             maxx = self.area[2]
             box = (maxx, miny, maxx + width, miny + height)  # just east instead
         try:
-            resp = requests.get(with_params(self.map_url, self.map_params(box)), headers=self.headers, timeout=120)
+            resp = requests.get(
+                with_params(self.map_url, self.map_params(box)),
+                headers=self.headers,
+                timeout=120,
+                verify=opts.verify_tls,
+            )
         except Exception:
             return None
         ctype = (resp.headers or {}).get("content-type", "")
