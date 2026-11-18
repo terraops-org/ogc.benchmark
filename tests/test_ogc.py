@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from locust import FastHttpUser
+from exceptions import ArgError
+from locust import FastHttpUser, task
+from locust.env import Environment
+from locust.runners import MasterRunner
 from locust.argument_parser import LocustArgumentParser
 
 from utils import ogc
@@ -28,6 +31,8 @@ from utils.ogc import (
     is_yx,
     mark_empty,
     owslib_auth,
+    reset_user_ids,
+    warm_up,
     request_headers,
     parse_extent,
     user_rng,
@@ -243,3 +248,51 @@ def test_request_headers():
     opts = SimpleNamespace(user_agent="probe/1", auth_user="u", auth_password="p")
     assert request_headers(opts) == {"User-Agent": "probe/1", "Authorization": "Basic dTpw"}
     assert request_headers(SimpleNamespace(user_agent="probe/1")) == {"User-Agent": "probe/1"}  # no auth options
+
+
+def recording_user(calls, fail=False):
+    class Recorder(FastHttpUser):
+        host = ""
+
+        def on_start(self):
+            calls.append(self.host)
+            if fail:
+                raise ArgError("bad option")
+
+        @task
+        def nothing(self):
+            pass
+
+    return Recorder
+
+
+def test_warm_up_runs_on_start_once_with_the_host():
+    calls = []
+    env = Environment(user_classes=[recording_user(calls)], host="http://example.com")
+    env.parsed_options = SimpleNamespace()
+    warm_up(env, runner=env.create_local_runner())
+    assert calls == ["http://example.com"]
+
+
+def test_warm_up_skips_the_master_and_a_missing_host():
+    calls = []
+    env = Environment(user_classes=[recording_user(calls)], host="http://example.com")
+    env.parsed_options = SimpleNamespace()
+    warm_up(env, runner=Mock(spec=MasterRunner))
+    env.host = None
+    warm_up(env, runner=None)
+    assert calls == []
+
+
+def test_warm_up_failure_is_not_raised():
+    calls = []
+    env = Environment(user_classes=[recording_user(calls, fail=True)], host="http://example.com")
+    env.parsed_options = SimpleNamespace()
+    warm_up(env, runner=None)  # ArgError already logged and the run stopped by handle_error
+    assert calls == ["http://example.com"]
+
+
+def test_reset_user_ids():
+    next(ogc._USER_IDS)
+    reset_user_ids()
+    assert next(ogc._USER_IDS) == 0

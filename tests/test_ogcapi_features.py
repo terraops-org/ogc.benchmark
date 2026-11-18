@@ -43,9 +43,8 @@ def make_user(*args, docs=None):
     env.parsed_options = default_options(ogcapi_features.init_parser, *args)
     user = OGCAPIFeaturesBenchmark(env)
     user.host = HOST
-    doc = docs or COLLECTIONS
-    get = Mock(return_value=Mock(json=Mock(return_value=doc), raise_for_status=Mock()))
-    with patch("utils.ogcapi.requests.get", get):
+    user.api = Mock(return_value=Mock(collections=Mock(return_value=docs or COLLECTIONS)))
+    with patch("ogcapi_features.Features", user.api):
         user.on_start()
     user.client = MagicMock()
     return user
@@ -159,7 +158,7 @@ def test_unreachable_host_stops_the_run():
     env.runner.quit = Mock()
     user = OGCAPIFeaturesBenchmark(env)
     user.host = HOST
-    with patch("utils.ogcapi.requests.get", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
+    with patch("ogcapi_features.Features", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
         user.on_start()
     gevent.sleep(0)
     env.runner.quit.assert_called_once()
@@ -172,3 +171,42 @@ def test_user_agent_sent():
     assert user.client.get.call_args.kwargs["headers"] == {
         "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
     }
+
+
+def test_metadata_through_owslib():
+    user = make_user("--auth-user", "u", "--auth-password", "p")
+    assert user.api.call_args.args[0] == HOST
+    assert user.api.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }
+    assert (user.api.call_args.kwargs["auth"].username, user.api.call_args.kwargs["auth"].verify) == ("u", False)
+
+
+def with_crs(crs_list, global_crs=None):
+    docs = copy.deepcopy(COLLECTIONS)
+    docs["collections"][1]["crs"] = crs_list
+    if global_crs is not None:
+        docs["crs"] = global_crs
+    return docs
+
+
+@pytest.mark.parametrize(
+    "crs_list", [["#/crs"], [crs_uri("EPSG:3763")], ["http://www.opengis.net/def/crs/OGC/0/CRS84"]]
+)
+def test_default_crs84_is_not_checked(crs_list):
+    """Without --crs no CRS parameter is sent, so the collection's list does not matter (I4)."""
+    query, _, _ = run_features(make_user(docs=with_crs(crs_list)))
+    assert "bbox-crs" not in query
+
+
+def test_crs_from_the_global_list():
+    docs = with_crs(["#/crs"], global_crs=[CRS84, crs_uri("EPSG:3763")])
+    query, _, _ = run_features(make_user("--crs", "EPSG:3763", docs=docs))
+    assert query["bbox-crs"] == crs_uri("EPSG:3763")
+    with pytest.raises(ArgError, match="EPSG/0/3763"):
+        make_user("--crs", "EPSG:25829", docs=docs)
+
+
+def test_crs_given_as_urn():
+    query, _, _ = run_features(make_user("--crs", "urn:ogc:def:crs:EPSG::3763"))
+    assert query["bbox-crs"] == query["crs"] == crs_uri("EPSG:3763")

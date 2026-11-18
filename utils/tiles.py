@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from gevent.pool import Pool
 from pyproj import CRS, Transformer
 
-from utils.ogc import is_metric, is_yx, intersect
+from utils.ogc import intersect, is_geographic, is_yx
 
 METRES_PER_DEGREE = 2 * math.pi * 6378137 / 360  # the WMTS standard's value for degree CRSs
 PIXEL_SIZE = 0.00028  # metres per pixel in WMTS scale denominators
@@ -39,8 +39,11 @@ class Coverage:
 
 
 def wmts_matrix(tm, crs):
-    """A Matrix from an OWSLib TileMatrix; topleftcorner comes in the CRS's axis order (lat/lon for EPSG:4326)."""
-    per_unit = 1.0 if is_metric(crs) else METRES_PER_DEGREE
+    """
+    A Matrix from an OWSLib TileMatrix; topleftcorner comes in the CRS's axis order (lat/lon for EPSG:4326).
+    A CRS pyproj does not know (ArcGIS's EPSG:102100) is taken as metres, x/y.
+    """
+    per_unit = METRES_PER_DEGREE if is_geographic(crs) else 1.0
     x0, y0 = tm.topleftcorner[::-1] if is_yx(crs) else tm.topleftcorner
     return Matrix(
         str(tm.identifier),
@@ -80,10 +83,10 @@ def to_crs_box(lonlat_box, crs):
 def tile_range(m, box):
     """(mincol, maxcol, minrow, maxrow) of the tiles a box (grid CRS, x/y) touches, clamped; None if it misses."""
     minx, miny, maxx, maxy = box
-    eps = 1e-9  # a box edge on a tile edge does not reach into the next tile
-    mincol = math.floor((minx - m.x0) / m.span_x)
+    eps = 1e-9  # a box edge on a tile edge, give or take rounding, does not reach into the next tile
+    mincol = math.floor((minx - m.x0) / m.span_x + eps)
     maxcol = max(mincol, math.ceil((maxx - m.x0) / m.span_x - eps) - 1)
-    minrow = math.floor((m.y0 - maxy) / m.span_y)
+    minrow = math.floor((m.y0 - maxy) / m.span_y + eps)
     maxrow = max(minrow, math.ceil((m.y0 - miny) / m.span_y - eps) - 1)
     if mincol > m.width - 1 or maxcol < 0 or minrow > m.height - 1 or maxrow < 0:
         return None

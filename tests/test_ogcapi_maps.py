@@ -57,7 +57,8 @@ def make_user(*args, get=None):
     user = OGCAPIMapsBenchmark(env)
     user.host = HOST
     user.metadata_get = get or answers()
-    with patch("utils.ogcapi.requests.get", user.metadata_get), patch("ogcapi_maps.requests.get", user.metadata_get):
+    user.api = Mock(return_value=Mock(collections=Mock(return_value=COLLECTIONS)))
+    with patch("ogcapi_maps.Maps", user.api), patch("ogcapi_maps.requests.get", user.metadata_get):
         user.on_start()
     user.client = MagicMock()
     return user
@@ -162,7 +163,7 @@ def test_unreachable_host_stops_the_run():
     env.runner.quit = Mock()
     user = OGCAPIMapsBenchmark(env)
     user.host = HOST
-    with patch("utils.ogcapi.requests.get", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
+    with patch("ogcapi_maps.Maps", side_effect=ConnectionError("down")), pytest.raises(ArgError, match="down"):
         user.on_start()
     gevent.sleep(0)
     env.runner.quit.assert_called_once()
@@ -184,3 +185,20 @@ def test_user_agent_sent():
         c.kwargs["headers"] == {"User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"}
         for c in user.metadata_get.call_args_list
     )
+
+
+def test_metadata_through_owslib():
+    user = make_user()
+    assert user.api.call_args.args[0] == HOST
+    assert user.api.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }
+    assert user.api.call_args.kwargs["auth"].verify is False
+
+
+def test_reference_stays_outside_the_collection_with_extent():
+    """--extent narrows the area; the blank reference must still lie outside the collection's data (I5)."""
+    user = make_user("--extent", "-9.3,38.6,-9.0,38.9")
+    (url,), _ = [c for c in user.metadata_get.call_args_list if urlparse(c.args[0]).path.endswith("/map")][0]
+    minx, miny, maxx, maxy = [float(v) for v in parse_qs(urlparse(url).query)["bbox"][0].split(",")]
+    assert maxx <= EXTENT[0]

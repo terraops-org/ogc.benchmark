@@ -166,3 +166,40 @@ def test_draws_repeat_with_the_seed():
     assert [draw_tile(a, levels[4], WORLD, cov) for _ in range(20)] == [
         draw_tile(b, levels[4], WORLD, cov) for _ in range(20)
     ]
+
+
+def test_limits_round_trip_on_non_round_spans():
+    """TileMatrixSetLimits -> box -> tile_range gives the limits back on GeoWebCache-style grids (I1)."""
+    rng = random.Random(1)
+    for z in range(1, 19):
+        tm = SimpleNamespace(
+            identifier=f"EPSG:900913:{z}",
+            topleftcorner=(-20037508.34, 20037508.34),
+            scaledenominator=559082264.0287178 / 2**z,
+            tilewidth=256,
+            tileheight=256,
+            matrixwidth=2**z,
+            matrixheight=2**z,
+        )
+        m = wmts_matrix(tm, "EPSG:3857")
+        for _ in range(50):
+            c0 = rng.randint(0, m.width - 1)
+            c1 = rng.randint(c0, m.width - 1)
+            r0 = rng.randint(0, m.height - 1)
+            r1 = rng.randint(r0, m.height - 1)
+            low, high = tile_box(m, c0, r1), tile_box(m, c1, r0)
+            assert tile_range(m, (low[0], low[1], high[2], high[3])) == (c0, c1, r0, r1), (z, c0, c1, r0, r1)
+
+
+def test_unknown_crs_is_taken_as_metres():
+    tm = SimpleNamespace(
+        identifier="0",
+        topleftcorner=(-20037508.34, 20037508.34),
+        scaledenominator=559082264.0287178,
+        tilewidth=256,
+        tileheight=256,
+        matrixwidth=1,
+        matrixheight=1,
+    )
+    m = wmts_matrix(tm, "urn:ogc:def:crs:EPSG::102100")  # ArcGIS Web Mercator id that pyproj does not know
+    assert m.span_x == pytest.approx(256 * 559082264.0287178 * 0.00028)

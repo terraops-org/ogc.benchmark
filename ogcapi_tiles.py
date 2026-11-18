@@ -17,6 +17,7 @@ from utils.ogc import (  # noqa: E402
     check_response,
     default_options,
     mark_empty,
+    parse_extent,
     request_headers,
     user_rng,
 )
@@ -118,6 +119,15 @@ class OGCAPITilesBenchmark(FastHttpUser):
         if self.target.id in limits:
             lim = limits[self.target.id]
             self.range = (lim["minTileCol"], lim["maxTileCol"], lim["minTileRow"], lim["maxTileRow"])
+            extent = parse_extent(opts.extent)
+            if extent:  # --extent narrows the limits too
+                r = tile_range(self.target, to_crs_box(extent, crs))
+                c0, c1, r0, r1 = self.range
+                self.range = r and (max(c0, r[0]), min(c1, r[1]), max(r0, r[2]), min(r1, r[3]))
+                if not self.range or self.range[0] > self.range[1] or self.range[2] > self.range[3]:
+                    raise ValueError(
+                        f"--extent {opts.extent} does not overlap the tileMatrixSetLimits of {self.target.id}"
+                    )
             return
         box = lonlat_area(col, opts.extent)
         self.range = tile_range(self.target, to_crs_box(box, crs))

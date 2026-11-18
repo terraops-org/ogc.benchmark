@@ -10,7 +10,9 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import urllib3
 from gevent.lock import BoundedSemaphore
 
+from exceptions import ArgError
 from locust import events
+from locust.runners import MasterRunner
 from locust.argument_parser import LocustArgumentParser
 from owslib.util import Authentication
 from pyproj import CRS
@@ -65,6 +67,18 @@ def _crs(code):
         return CRS.from_user_input("OGC:CRS84" if code == "CRS:84" else code)
     except CRSError:
         return None
+
+
+def same_crs(a, b):
+    """True when two CRS codes or URIs name the same CRS (pyproj); strings compared when pyproj reads neither."""
+    ca, cb = _crs(a), _crs(b)
+    return ca == cb if ca is not None and cb is not None else a == b
+
+
+@lru_cache(maxsize=None)
+def crs_known(code):
+    """True when pyproj can read the CRS (ArcGIS's EPSG:102100, for one, it cannot)."""
+    return _crs(code) is not None
 
 
 @lru_cache(maxsize=None)
@@ -250,6 +264,33 @@ def apply_verify_tls(environment, **kwargs):
             user_class.insecure = False
     else:
         logger.info("TLS certificates are not checked (--verify-tls checks them)")
+
+
+@events.init.add_listener
+def warm_up(environment, runner=None, **kwargs):
+    """
+    Run each user class's start-up once before the run: metadata (GetCapabilities, OGC API landing page and
+    collections), the WMTS probe and the Maps reference are cached when the first user starts, so Locust's -t
+    clock and statistics count the load only. Locust fires `init` before it starts the runner and the -t timer.
+
+    Skipped on a distributed master (the workers warm up) and without --host (web UI: the host comes later).
+    """
+    if environment.parsed_options is None or isinstance(runner, MasterRunner) or not environment.host:
+        return
+    for user_class in environment.user_classes:
+        user = user_class(environment)
+        user.host = environment.host  # Locust copies --host onto the classes only when the run starts
+        try:
+            user.on_start()
+        except ArgError:  # logged, exit code 1 set and runner.quit() scheduled by handle_error
+            return
+
+
+@events.test_start.add_listener
+def reset_user_ids(**kwargs):
+    """Number the simulated users from 0 at every run (after the warm-up, and for each web UI run)."""
+    global _USER_IDS
+    _USER_IDS = itertools.count()
 
 
 def owslib_auth(opts):

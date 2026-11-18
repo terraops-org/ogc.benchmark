@@ -1,5 +1,6 @@
 """Unit tests for utils/ogcapi.py: CRS URIs, cached JSON, collections, links, extents."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -14,6 +15,8 @@ from utils.ogcapi import (
     link,
     lonlat_area,
     lonlat_extent,
+    offered_crss,
+    ogcapi_collections,
     pick_collection,
 )
 
@@ -114,3 +117,53 @@ def test_cached_json_verify():
         assert get.call_args.kwargs["verify"] is False  # TLS certificates are not checked by default
         cached_json("https://x/b", {}, verify=True)
         assert get.call_args.kwargs["verify"] is True
+
+
+def fake_api(doc):
+    return Mock(return_value=Mock(collections=Mock(return_value=doc)))
+
+
+OPTS = SimpleNamespace(
+    user_agent="ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)",
+    auth_user="u",
+    auth_password="p",
+    verify_tls=False,
+)
+
+
+def test_ogcapi_collections_through_owslib():
+    api = fake_api({"collections": [{"id": "a"}]})
+    assert ogcapi_collections(api, "https://x/api", OPTS) == {"collections": [{"id": "a"}]}
+    assert ogcapi_collections(api, "https://x/api", OPTS) == {"collections": [{"id": "a"}]}
+    api.assert_called_once()  # landing page and /collections once per process
+    assert api.call_args.args[0] == "https://x/api"
+    assert api.call_args.kwargs["headers"] == {
+        "User-Agent": "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
+    }  # never Authorization: OWSLib shares this dict
+    auth = api.call_args.kwargs["auth"]
+    assert (auth.username, auth.password, auth.verify) == ("u", "p", False)
+
+
+def test_ogcapi_collections_timeout():
+    import gevent
+
+    def slow(*args, **kwargs):
+        gevent.sleep(5)
+
+    with pytest.raises(TimeoutError):
+        ogcapi_collections(Mock(side_effect=slow), "https://slow/api", OPTS, timeout=0.05)
+
+
+def test_crs_uri_reads_urns():
+    assert crs_uri("urn:ogc:def:crs:EPSG::3763") == "http://www.opengis.net/def/crs/EPSG/0/3763"
+    assert crs_uri("urn:ogc:def:crs:OGC:1.3:CRS84") == CRS84
+
+
+def test_offered_crss_resolve_the_global_list():
+    doc = {"crs": [CRS84, crs_uri("EPSG:3763")]}
+    assert offered_crss({"crs": ["#/crs", crs_uri("EPSG:4258")]}, doc) == [
+        CRS84,
+        crs_uri("EPSG:3763"),
+        crs_uri("EPSG:4258"),
+    ]
+    assert offered_crss({}, doc) == [CRS84]

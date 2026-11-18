@@ -10,6 +10,7 @@ import re  # noqa: E402
 
 from exceptions import ArgError  # noqa: E402
 from locust import FastHttpUser, between, events, task  # noqa: E402
+from owslib.ogcapi.features import Features  # noqa: E402
 
 from utils.ogc import (  # noqa: E402
     FEATURES,
@@ -23,10 +24,19 @@ from utils.ogc import (  # noqa: E402
     is_yx,
     mark_empty,
     request_headers,
+    same_crs,
     user_rng,
     with_params,
 )
-from utils.ogcapi import CRS84, collections, crs_uri, link, lonlat_area, pick_collection  # noqa: E402
+from utils.ogcapi import (  # noqa: E402
+    CRS84,
+    crs_uri,
+    link,
+    lonlat_area,
+    offered_crss,
+    ogcapi_collections,
+    pick_collection,
+)
 from utils.random_bbox import random_bbox  # noqa: E402
 from utils.tiles import to_crs_box  # noqa: E402
 
@@ -103,13 +113,15 @@ class OGCAPIFeaturesBenchmark(FastHttpUser):
 
     def setup(self, opts):
         """Set collection, items URL, CRS and area (in that CRS); ValueError if unusable."""
-        col = pick_collection(collections(self.host, self.headers, opts.verify_tls), opts.collection, "items")
+        doc = ogcapi_collections(Features, self.host, opts)
+        col = pick_collection(doc["collections"], opts.collection, "items")
         self.collection = col["id"]
         self.items_url = link(col, "items", "application/geo+json") or link(col, "items")
         self.crs = crs_uri(opts.crs) if opts.crs else CRS84
-        offered = sorted({crs_uri(c) for c in col.get("crs") or [CRS84]})
-        if self.crs not in offered:
-            raise ValueError(f"Collection '{self.collection}' does not offer CRS {self.crs}; offered: {offered}")
+        if opts.crs:  # without --crs no CRS parameter is sent: the collection's list does not matter
+            offered = offered_crss(col, doc)
+            if not any(same_crs(self.crs, crs) for crs in offered):
+                raise ValueError(f"Collection '{self.collection}' does not offer CRS {self.crs}; offered: {offered}")
         if not (is_metric(self.crs) or is_geographic(self.crs)):
             raise ValueError(f"CRS {self.crs} is neither in metres nor in degrees")
         box = lonlat_area(col, opts.extent)

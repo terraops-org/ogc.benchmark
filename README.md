@@ -213,6 +213,16 @@ export LOCUST_AUTH_USER=... LOCUST_AUTH_PASSWORD=...
 uv run locust -f wms.py --headless --host https://example.org/protected/wms -u 5 -r 1 -t 2m
 ```
 
+### What is timed
+
+The start-up runs once per process **before** the run time (`-t`) starts: GetCapabilities (WMS, WMTS, WFS), the
+OGC API landing page and collections, the WMTS coverage probe and the Maps reference map. The statistics and the
+HTML report count only the load requests (GetMap, GetTile, GetFeature, OGC API tiles, items and maps). In the web
+UI without `--host`, the start-up happens when the run starts instead.
+
+The OGC API metadata of `ogcapi_features.py` and `ogcapi_maps.py` is read through OWSLib (`owslib.ogcapi`);
+`ogcapi_tiles.py` reads it directly, since OWSLib 0.36 has no OGC API - Tiles support.
+
 ### TLS certificates
 
 Many test servers have certificate problems (self-signed, expired, wrong name), so certificates are **not

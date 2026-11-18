@@ -15,6 +15,7 @@ from utils.ogc import (
     add_extent_arg,
     cached_capabilities,
     check_response,
+    crs_known,
     default_options,
     intersect,
     is_geographic,
@@ -25,7 +26,17 @@ from utils.ogc import (
     parse_extent,
     user_rng,
 )
-from utils.tiles import digest, draw_tile, find_coverage, probe_level, tile_box, tile_range, to_crs_box, wmts_matrix
+from utils.tiles import (
+    Coverage,
+    digest,
+    draw_tile,
+    find_coverage,
+    probe_level,
+    tile_box,
+    tile_range,
+    to_crs_box,
+    wmts_matrix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +144,18 @@ class WMTSBenchmark(FastHttpUser):
         it, so the draws land under tiles with an image instead of all over the grid.
         """
         crs = self.wmts.tilematrixsets[self.tile_matrix_set].crs
-        if not (is_metric(crs) or is_geographic(crs)):
+        try:
+            extent = parse_extent(opts.extent)
+        except ValueError as e:
+            ArgError(str(e)).handle_error(self.environment)
+        known = crs_known(crs)
+        if not known:  # the grid still works in its own units; only lon/lat areas need the CRS
+            if extent:
+                ArgError(
+                    f"--extent needs a CRS pyproj knows; TileMatrixSet {self.tile_matrix_set} has {crs}"
+                ).handle_error(self.environment)
+            logger.warning(f"pyproj does not know CRS {crs}: grid taken in metres, area = the whole tile matrix")
+        elif not (is_metric(crs) or is_geographic(crs)):
             ArgError(
                 f"TileMatrixSet {self.tile_matrix_set}: CRS {crs} is neither in metres nor in degrees"
             ).handle_error(self.environment)
@@ -145,12 +167,18 @@ class WMTSBenchmark(FastHttpUser):
             low = tile_box(self.target, lim.mintilecol, lim.maxtilerow)
             high = tile_box(self.target, lim.maxtilecol, lim.mintilerow)
             self.area = (low[0], low[1], high[2], high[3])
+            if extent:  # --extent narrows the limits too
+                self.area = intersect(self.area, to_crs_box(extent, crs))
+                if self.area is None:
+                    ArgError(
+                        f"--extent {opts.extent} does not overlap the TileMatrixSetLimits of {self.target.id}"
+                    ).handle_error(self.environment)
+        elif not known:
+            low = tile_box(self.target, 0, self.target.height - 1)
+            high = tile_box(self.target, self.target.width - 1, 0)
+            self.area = (low[0], low[1], high[2], high[3])
         else:
             wgs84 = tuple(self.layer.boundingBoxWGS84 or (-180.0, -90.0, 180.0, 90.0))[:4]
-            try:
-                extent = parse_extent(opts.extent)
-            except ValueError as e:
-                ArgError(str(e)).handle_error(self.environment)
             box = intersect(wgs84, extent) if extent else wgs84
             if box is None:
                 ArgError(f"--extent {opts.extent} does not overlap the layer's WGS84 bbox {wgs84}").handle_error(
@@ -161,6 +189,12 @@ class WMTSBenchmark(FastHttpUser):
             ArgError(f"The area {self.area} is outside TileMatrix {self.target.id}").handle_error(self.environment)
 
         level = probe_level(levels, self.target, self.area)
+        if level is None:
+            self.coverage = Coverage(self.target, (), None, 0)
+            logger.warning(
+                "no level small enough to probe (at most 256 tiles in the area); drawing over the whole area"
+            )
+            return
         key = ("wmts-probe", self.host, self.layer_name, self.tile_matrix_set, self.target.id, self.area)
         started = time.monotonic()
         self.coverage, probed_now = cached_capabilities(

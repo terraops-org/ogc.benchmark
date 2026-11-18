@@ -11,6 +11,7 @@ import random  # noqa: E402
 import requests  # noqa: E402
 from exceptions import ArgError  # noqa: E402
 from locust import FastHttpUser, between, constant_throughput, events, task  # noqa: E402
+from owslib.ogcapi.maps import Maps  # noqa: E402
 
 from utils.ogc import (  # noqa: E402
     IMAGE,
@@ -30,7 +31,15 @@ from utils.ogc import (  # noqa: E402
     user_rng,
     with_params,
 )
-from utils.ogcapi import CRS84, collections, crs_uri, link, lonlat_area, pick_collection  # noqa: E402
+from utils.ogcapi import (  # noqa: E402
+    CRS84,
+    crs_uri,
+    link,
+    lonlat_area,
+    lonlat_extent,
+    ogcapi_collections,
+    pick_collection,
+)
 from utils.random_bbox import random_bbox  # noqa: E402
 from utils.tiles import to_crs_box  # noqa: E402
 
@@ -107,7 +116,7 @@ class OGCAPIMapsBenchmark(FastHttpUser):
 
     def setup(self, opts):
         """Set collection, map URL, CRS and area (in that CRS); ValueError if unusable."""
-        col = pick_collection(collections(self.host, self.headers, opts.verify_tls), opts.collection, "map")
+        col = pick_collection(ogcapi_collections(Maps, self.host, opts)["collections"], opts.collection, "map")
         self.collection = col["id"]
         self.map_url = link(col, "map", "image/png") or link(col, "map")
         self.crs = crs_uri(opts.crs) if opts.crs else CRS84
@@ -115,6 +124,11 @@ class OGCAPIMapsBenchmark(FastHttpUser):
             raise ValueError(f"CRS {self.crs} is neither in metres nor in degrees")
         box = lonlat_area(col, opts.extent)
         self.area = box if self.crs == CRS84 else to_crs_box(box, self.crs)
+        try:  # the blank reference goes outside the collection's data, not just outside --extent
+            own = lonlat_extent(col)
+            self.data_area = own if self.crs == CRS84 else to_crs_box(own, self.crs)
+        except ValueError:
+            self.data_area = self.area
 
     def map_params(self, box):
         """The map query parameters for a bbox (x/y order); y/x CRSs get latitude first, as the standard says."""
@@ -130,10 +144,10 @@ class OGCAPIMapsBenchmark(FastHttpUser):
         """The bytes of a map just outside the extent (no data there), or None if that request fails."""
         size = random_bbox(random.Random(0), self.area, self.areas[0], opts.bbox_ratio, not is_metric(self.crs))
         width, height = size[2] - size[0], size[3] - size[1]
-        minx, miny = self.area[0], self.area[1]
-        box = (minx - width, miny, minx, miny + height)  # just west of the extent
+        minx, miny = self.data_area[0], self.data_area[1]
+        box = (minx - width, miny, minx, miny + height)  # just west of the collection's extent
         if self.crs == CRS84 and box[0] < -180:
-            maxx = self.area[2]
+            maxx = self.data_area[2]
             box = (maxx, miny, maxx + width, miny + height)  # just east instead
         try:
             resp = requests.get(

@@ -242,3 +242,26 @@ def test_metadata_fetched_once_per_process():
 def test_tls_not_verified_by_default():
     assert all(c.kwargs["verify"] is False for c in make_user().metadata_get.call_args_list)
     assert all(c.kwargs["verify"] is True for c in make_user("--verify-tls").metadata_get.call_args_list)
+
+
+TILE_LIMITS = [{"tileMatrix": "12", "minTileRow": 1500, "maxTileRow": 1600, "minTileCol": 1900, "maxTileCol": 2000}]
+
+
+def with_limits(docs):
+    docs["/api/collections/cos/tiles/WebMercatorQuad"]["tileMatrixSetLimits"] = TILE_LIMITS
+
+
+def test_extent_narrows_the_limits():
+    user = make_user("--extent", "-9.3,38.6,-9.0,38.9", docs=with_changes(with_limits))
+    c0, c1, r0, r1 = tile_range(Z12, to_crs_box((-9.3, 38.6, -9.0, 38.9), "EPSG:3857"))
+    assert user.range == (max(1900, c0), min(2000, c1), max(1500, r0), min(1600, r1))
+
+
+def test_extent_outside_limits_refused():
+    with pytest.raises(ArgError, match="does not overlap"):
+        make_user("--extent", "100,10,101,11", docs=with_changes(with_limits))
+
+
+def test_bad_extent_with_limits_refused():
+    with pytest.raises(ArgError, match="--extent"):
+        make_user("--extent", "not,an,extent,here", docs=with_changes(with_limits))

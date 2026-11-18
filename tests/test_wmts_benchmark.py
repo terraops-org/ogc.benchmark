@@ -37,7 +37,7 @@ def matrix(k):
     )
 
 
-def make_service(limits=None):
+def make_service(limits=None, ids=None, crs="EPSG:28992"):
     layer = Mock()
     layer.formats = ["image/png"]
     layer.boundingBoxWGS84 = WGS84
@@ -45,7 +45,7 @@ def make_service(limits=None):
     service = Mock()
     service.contents = {"a": layer}
     service.tilematrixsets = {
-        "EPSG:28992": SimpleNamespace(crs="EPSG:28992", tilematrix={k: matrix(k) for k in MATRICES})
+        "EPSG:28992": SimpleNamespace(crs=crs, tilematrix={k: matrix(k) for k in (ids or MATRICES)})
     }
     return service
 
@@ -62,7 +62,7 @@ def probe_answer(image=lambda col, row: (col, row) == IMAGE_TILE):
     return Mock(side_effect=get)
 
 
-def make_user(*args, limits=None, probe=None):
+def make_user(*args, limits=None, probe=None, ids=None, crs="EPSG:28992"):
     ogc._CAPS.clear()
     env = Environment(user_classes=[WMTSBenchmark])
     env.create_local_runner()
@@ -71,7 +71,7 @@ def make_user(*args, limits=None, probe=None):
     user.host = "http://example.com/wmts"
     user.probe_get = probe or probe_answer()
     with (
-        patch("wmts.WebMapTileService", return_value=make_service(limits)) as ctor,
+        patch("wmts.WebMapTileService", return_value=make_service(limits, ids, crs)) as ctor,
         patch("wmts.requests.get", user.probe_get),
     ):
         user.on_start()
@@ -234,3 +234,46 @@ def test_user_agent_sent():
         c.kwargs["headers"]["User-Agent"] == "ogc.benchmark/0.1.0 (+https://github.com/terraops-org/ogc.benchmark)"
         for c in user.probe_get.call_args_list
     )
+
+
+def test_no_level_small_enough_to_probe(caplog):
+    """Only a fine level (100 x 200 tiles, the area holds more than 256): warn and draw over the area (I2)."""
+    user = make_user(ids=["2"])
+    assert "no level small enough to probe" in caplog.text
+    c0, c1, r0, r1 = tile_range(LEVELS["2"], user.area)
+    tiles = [tile(run_tile(user)[0]) for _ in range(30)]
+    assert all(c0 <= col <= c1 and r0 <= row <= r1 for col, row in tiles)
+
+
+LIMITS = {"2": SimpleNamespace(mintilerow=90, maxtilerow=120, mintilecol=50, maxtilecol=80)}
+
+
+def test_extent_outside_limits_stops_the_run():
+    with pytest.raises(ArgError, match="does not overlap"):
+        make_user("--tile-matrix", "2", "--extent", "100,10,101,11", limits=LIMITS)
+
+
+def test_bad_extent_with_limits_stops_the_run():
+    with pytest.raises(ArgError, match="--extent"):
+        make_user("--tile-matrix", "2", "--extent", "not,an,extent,here", limits=LIMITS)
+
+
+def test_extent_narrows_the_limits():
+    user = make_user("--tile-matrix", "2", "--extent", "4.0,51.0,6.0,53.0", limits=LIMITS)
+    c0, c1, r0, r1 = tile_range(LEVELS["2"], to_crs_box((4.0, 51.0, 6.0, 53.0), "EPSG:28992"))
+    tiles = [tile(run_tile(user)[0]) for _ in range(40)]
+    assert c0 < 80 and c1 > 50 and r0 < 120 and r1 > 90  # the extent and the limits overlap
+    assert all(max(50, c0) <= col <= min(80, c1) and max(90, r0) <= row <= min(120, r1) for col, row in tiles)
+
+
+def test_unknown_grid_crs_uses_the_whole_matrix(caplog):
+    """A TileMatrixSet CRS pyproj cannot read (EPSG:102100) worked before the probe: it must still run (I6)."""
+    user = make_user("--tile-matrix", "1", crs="urn:ogc:def:crs:EPSG::102100")
+    assert "pyproj does not know" in caplog.text
+    tiles = [tile(run_tile(user)[0]) for _ in range(30)]
+    assert all(0 <= col <= 9 and 0 <= row <= 19 for col, row in tiles)
+
+
+def test_unknown_grid_crs_with_extent_stops_the_run():
+    with pytest.raises(ArgError, match="--extent"):
+        make_user("--extent", "4.0,51.0,6.0,53.0", crs="urn:ogc:def:crs:EPSG::102100")
