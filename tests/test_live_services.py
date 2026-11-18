@@ -19,6 +19,7 @@ from utils.ogc import default_options
 
 PDOK_WMS = "https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0"
 PDOK_WMTS = "https://service.pdok.nl/lv/bgt/wmts/v1_0"
+PDOK_ORTHO_WMTS = "https://service.pdok.nl/hwh/luchtfotorgb/wmts/v1_0"
 PDOK_WFS = "https://service.pdok.nl/lv/bag/wfs/v2_0"
 UNREACHABLE = (requests.ConnectionError, requests.Timeout)
 
@@ -62,7 +63,29 @@ def test_wmts_tile_request():
     start_or_skip(user)
     user.load_tile()
     ((name, status, exception, _),) = seen
-    assert (name, status, exception) == ("GetTile", 200, None)
+    assert name in ("GetTile", "GetTile (empty)") and (status, exception) == (200, None)
+
+
+def test_wmts_probe_finds_images():
+    """The start-up probe on an orthophoto WMTS: some coarse tiles have images, not all; most draws land on images."""
+    user, seen = make_user(
+        wmts,
+        wmts.WMTSBenchmark,
+        PDOK_ORTHO_WMTS,
+        "--layer-name",
+        "Actueel_orthoHR",
+        "--tile-matrix-set",
+        "EPSG:28992",
+        "--tile-matrix",
+        "10",
+    )
+    start_or_skip(user)
+    assert 0 < len(user.coverage.tiles) < user.coverage.fetched
+    for _ in range(20):
+        user.load_tile()
+    images = sum(1 for name, status, exception, _ in seen if name == "GetTile" and status == 200 and not exception)
+    print(f"{images} of 20 tiles with images")
+    assert images >= 5
 
 
 def test_wms_capabilities():

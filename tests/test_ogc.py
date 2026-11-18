@@ -13,11 +13,16 @@ from utils.ogc import (
     CAPABILITIES,
     FEATURES,
     IMAGE,
+    auth_header,
+    bbox_areas,
     cached_capabilities,
     check_response,
+    intersect,
     is_geographic,
     is_metric,
     is_yx,
+    mark_empty,
+    parse_extent,
     user_rng,
 )
 
@@ -135,3 +140,52 @@ def test_capabilities_fetched_once_while_users_arrive_together():
     assert len(calls) == 1
     assert sorted(job.value[1] for job in jobs) == [False, False, False, False, True]  # one fetched, four reused
     assert {job.value[0] for job in jobs} == {"doc"}
+
+
+def test_204_is_an_empty_success_only_when_allowed():
+    resp = fake_response(204)
+    assert check_response(resp, IMAGE, empty_ok=True) is True
+    resp.failure.assert_not_called()
+    resp = fake_response(204)
+    assert check_response(resp, IMAGE) is False
+    resp.failure.assert_called_once_with("HTTP 204")
+
+
+def test_check_response_returns_success():
+    assert check_response(fake_response(200, "image/png"), IMAGE) is True
+    assert check_response(fake_response(500, "text/html"), IMAGE) is False
+
+
+def test_mark_empty_renames():
+    resp = SimpleNamespace(request_meta={"name": "GetTile"})
+    mark_empty(resp)
+    assert resp.request_meta["name"] == "GetTile (empty)"
+
+
+def test_auth_header():
+    assert auth_header(SimpleNamespace(auth_user="u", auth_password="p")) == {"Authorization": "Basic dTpw"}
+    assert auth_header(SimpleNamespace(auth_user="", auth_password="")) == {}
+
+
+@pytest.mark.parametrize("text", ["1,2,3", "a,b,c,d", "-9,39,-9.5,38.5", "-200,0,0,10", "0,-95,10,0"])
+def test_parse_extent_rejects(text):
+    with pytest.raises(ValueError):
+        parse_extent(text)
+
+
+def test_parse_extent():
+    assert parse_extent("") is None
+    assert parse_extent("-9.5,38.5,-9.0,39.0") == (-9.5, 38.5, -9.0, 39.0)
+
+
+def test_intersect():
+    assert intersect((0, 0, 10, 10), (5, 5, 20, 20)) == (5, 5, 10, 10)
+    assert intersect((0, 0, 10, 10), (20, 20, 30, 30)) is None
+    assert intersect((0, 0, 10, 10), (10, 0, 20, 10)) is None  # touching edges: no area
+
+
+def test_bbox_areas():
+    assert bbox_areas(SimpleNamespace(bbox_areas="1,10,100", bbox_area=100.0)) == [1.0, 10.0, 100.0]
+    assert bbox_areas(SimpleNamespace(bbox_areas="", bbox_area=50.0)) == [50.0]
+    with pytest.raises(ValueError, match="--bbox-areas must be km2 numbers"):
+        bbox_areas(SimpleNamespace(bbox_areas="a", bbox_area=100.0))

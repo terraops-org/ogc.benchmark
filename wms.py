@@ -2,7 +2,6 @@
 
 import logging
 import math
-from base64 import b64encode
 
 from exceptions import ArgError
 from locust import FastHttpUser, between, constant_throughput, events, task
@@ -12,7 +11,11 @@ from owslib.wms import WebMapService
 from utils.ogc import (
     CAPABILITIES,
     IMAGE,
+    add_auth_args,
     add_common_args,
+    add_map_args,
+    auth_header,
+    bbox_areas,
     cached_capabilities,
     check_response,
     default_options,
@@ -45,14 +48,6 @@ def init_parser(parser):
         help="Weighted layer mix, e.g. 'layerA:55,layerB:15'. Overrides --layer-name.",
     )
     parser.add_argument(
-        "--bbox-areas",
-        type=str,
-        default="",
-        env_var="LOCUST_BBOX_AREAS",
-        help="Comma-separated bbox areas in km2, one picked at random per request (zoom mix), e.g. '1,10,100'. "
-        "Overrides --bbox-area.",
-    )
-    parser.add_argument(
         "--crs",
         type=str,
         default="",
@@ -61,41 +56,14 @@ def init_parser(parser):
         "WGS84 extent if missing). Default: the layer's first CRS in metres.",
     )
     parser.add_argument(
-        "--width", type=int, default=512, env_var="LOCUST_WIDTH", help="GetMap width in pixels (default 512)"
-    )
-    parser.add_argument(
-        "--height", type=int, default=512, env_var="LOCUST_HEIGHT", help="GetMap height in pixels (default 512)"
-    )
-    parser.add_argument(
-        "--user-rps",
-        type=float,
-        default=0.0,
-        env_var="LOCUST_USER_RPS",
-        help="Requests per second per user (constant throughput), so total rate = users x this value. "
-        "Default 0 keeps the 1-2 s wait between requests.",
-    )
-    parser.add_argument(
         "--caps-ratio",
         type=float,
         default=0.0,
         env_var="LOCUST_CAPS_RATIO",
         help="Fraction of requests that are GetCapabilities instead of GetMap, e.g. 0.001 (default 0).",
     )
-    parser.add_argument(
-        "--auth-user",
-        type=str,
-        default="",
-        env_var="LOCUST_AUTH_USER",
-        help="HTTP basic auth user, for GetCapabilities and every request (default: none)",
-    )
-    parser.add_argument(
-        "--auth-password",
-        type=str,
-        default="",
-        env_var="LOCUST_AUTH_PASSWORD",
-        include_in_web_ui=False,  # the web UI page would carry its value in clear
-        help="HTTP basic auth password; prefer the env var, the command line is visible in ps",
-    )
+    add_map_args(parser)
+    add_auth_args(parser)
 
 
 @events.init.add_listener
@@ -148,10 +116,7 @@ class WMSBenchmark(FastHttpUser):
         """Check the options, read GetCapabilities (once per process), then pick layers, extents and a random stream."""
         opts = self.environment.parsed_options
         self.areas, mix = self.check_options(opts)
-        self.headers = {}
-        if opts.auth_user:
-            token = b64encode(f"{opts.auth_user}:{opts.auth_password}".encode()).decode()
-            self.headers["Authorization"] = f"Basic {token}"
+        self.headers = auth_header(opts)
 
         self.wms, first_user = self.get_wms(opts)
         self.layers = list(self.wms.contents)
@@ -184,11 +149,9 @@ class WMSBenchmark(FastHttpUser):
     def check_options(self, opts):
         """(bbox areas, layer mix), checked once at start: a bad value stops the run here, not on every request."""
         try:
-            areas = [float(a) for a in opts.bbox_areas.split(",")] if opts.bbox_areas else [opts.bbox_area]
-        except ValueError:
-            ArgError(f"--bbox-areas must be km2 numbers, e.g. '1,10,100', got '{opts.bbox_areas}'").handle_error(
-                self.environment
-            )
+            areas = bbox_areas(opts)
+        except ValueError as e:
+            ArgError(str(e)).handle_error(self.environment)
         mix = [mix_item(item) for item in opts.layers.split(",") if item.strip()]
         problems = []
         if min(areas) <= 0 or opts.bbox_ratio <= 0:

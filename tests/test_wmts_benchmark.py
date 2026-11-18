@@ -12,37 +12,78 @@ import wmts
 from exceptions import ArgError
 from utils import ogc
 from utils.ogc import default_options
+from utils.tiles import Matrix, tile_range, to_crs_box
 from wmts import WMTSBenchmark
 
 MATRICES = {"0": (1, 1), "1": (10, 20), "2": (100, 200)}  # id: (matrixwidth, matrixheight); middle is "1"
+SPANS = {"0": 1_000_000, "1": 100_000, "2": 10_000}  # metres per tile: every level covers the same 1000 x 2000 km
+ORIGIN = (-500_000.0, 1_500_000.0)  # top-left corner, EPSG:28992 x/y
+WGS84 = (4.0, 51.0, 6.0, 53.0)  # the layer's WGS84 bbox: part of the grid
+LEVELS = {k: Matrix(k, *ORIGIN, SPANS[k], SPANS[k] * (2 if k == "0" else 1), w, h) for k, (w, h) in MATRICES.items()}
+IMAGE_TILE = tile_range(LEVELS["1"], to_crs_box((5.1, 52.0, 5.1, 52.0), "EPSG:28992"))[0::2]  # (col, row), level 1
 
 
-def make_service():
+def matrix(k):
+    w, h = MATRICES[k]
+    scale = SPANS[k] / (256 * 0.00028)
+    return SimpleNamespace(
+        identifier=k,
+        topleftcorner=ORIGIN,
+        scaledenominator=scale,
+        tilewidth=256,
+        tileheight=512 if k == "0" else 256,
+        matrixwidth=w,
+        matrixheight=h,
+    )
+
+
+def make_service(limits=None):
     layer = Mock()
     layer.formats = ["image/png"]
-    layer.tilematrixsetlinks = {"EPSG:28992": Mock()}
-    matrices = {k: SimpleNamespace(matrixwidth=w, matrixheight=h) for k, (w, h) in MATRICES.items()}
+    layer.boundingBoxWGS84 = WGS84
+    layer.tilematrixsetlinks = {"EPSG:28992": SimpleNamespace(tilematrixlimits=limits or {})}
     service = Mock()
     service.contents = {"a": layer}
-    service.tilematrixsets = {"EPSG:28992": SimpleNamespace(tilematrix=matrices)}
+    service.tilematrixsets = {
+        "EPSG:28992": SimpleNamespace(crs="EPSG:28992", tilematrix={k: matrix(k) for k in MATRICES})
+    }
     return service
 
 
-def make_user(*args):
+def probe_answer(image=lambda col, row: (col, row) == IMAGE_TILE):
+    """A fake requests.get for the probe: an image under `image(col, row)`, the same blank body elsewhere."""
+
+    def get(url, **kwargs):
+        q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+        col, row = int(q["TILECOL"]), int(q["TILEROW"])
+        body = b"IMG-%d-%d" % (col, row) if image(col, row) else b"BLANK"
+        return SimpleNamespace(status_code=200, content=body)
+
+    return Mock(side_effect=get)
+
+
+def make_user(*args, limits=None, probe=None):
     ogc._CAPS.clear()
     env = Environment(user_classes=[WMTSBenchmark])
     env.create_local_runner()
     env.parsed_options = default_options(wmts.init_parser, *args)
     user = WMTSBenchmark(env)
     user.host = "http://example.com/wmts"
-    with patch("wmts.WebMapTileService", return_value=make_service()):
+    user.probe_get = probe or probe_answer()
+    with patch("wmts.WebMapTileService", return_value=make_service(limits)), patch("wmts.requests.get", user.probe_get):
         user.on_start()
     user.client = MagicMock()
     return user
 
 
 def fake_resp(status=200, ctype="image/png", content=b"\x89PNG"):
-    return SimpleNamespace(status_code=status, headers={"content-type": ctype}, content=content, failure=Mock())
+    return SimpleNamespace(
+        status_code=status,
+        headers={"content-type": ctype},
+        content=content,
+        failure=Mock(),
+        request_meta={"name": "GetTile"},
+    )
 
 
 def run_tile(user, resp=None):
@@ -113,3 +154,54 @@ def test_capabilities_fetched_once_per_process():
     with patch("wmts.WebMapTileService") as service:
         user.on_start()
     service.assert_not_called()
+
+
+def test_tiles_drawn_only_under_image_tiles():
+    user = make_user("--tile-matrix", "2")
+    tiles = [tile(run_tile(user)[0]) for _ in range(50)]
+    assert all((col // 10, row // 10) == IMAGE_TILE for col, row in tiles)  # level 2 is 10 x 10 per level-1 tile
+
+
+def test_blank_tile_reported_as_empty():
+    user = make_user()
+    _, resp = run_tile(user, fake_resp(content=b"BLANK"))
+    assert resp.request_meta["name"] == "GetTile (empty)"
+    resp.failure.assert_not_called()
+    _, resp = run_tile(user, fake_resp(content=b"IMG"))
+    assert resp.request_meta["name"] == "GetTile"
+
+
+def test_extent_outside_layer_stops_the_run():
+    with pytest.raises(ArgError, match="does not overlap"):
+        make_user("--extent", "100,10,101,11")
+
+
+def test_bad_extent_stops_the_run():
+    with pytest.raises(ArgError, match="--extent"):
+        make_user("--extent", "5,52,4,51")
+
+
+def test_probe_runs_once_per_process():
+    first = make_user("--tile-matrix", "2")
+    probed = first.probe_get.call_count
+    assert probed > 1
+    user = WMTSBenchmark(first.environment)
+    user.host = "http://example.com/wmts"
+    with patch("wmts.WebMapTileService", return_value=make_service()), patch("wmts.requests.get") as get:
+        user.on_start()
+    get.assert_not_called()
+
+
+def test_no_image_tiles_warns_and_uses_area(caplog):
+    user = make_user("--tile-matrix", "2", probe=probe_answer(image=lambda col, row: False))
+    assert "no tile with an image" in caplog.text
+    c0, c1, r0, r1 = tile_range(LEVELS["2"], user.area)
+    tiles = [tile(run_tile(user)[0]) for _ in range(50)]
+    assert all(c0 <= col <= c1 and r0 <= row <= r1 for col, row in tiles)
+
+
+def test_tile_matrix_limits_used_when_advertised():
+    limits = {"2": SimpleNamespace(mintilerow=2, maxtilerow=3, mintilecol=4, maxtilecol=5)}
+    user = make_user("--tile-matrix", "2", limits=limits)
+    tiles = [tile(run_tile(user)[0]) for _ in range(50)]
+    assert all(4 <= col <= 5 and 2 <= row <= 3 for col, row in tiles)

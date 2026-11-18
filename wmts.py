@@ -1,13 +1,29 @@
-"""WMTS GetTile load test (KVP): random tiles of one tile matrix of a layer."""
+"""WMTS GetTile load test (KVP): random tiles of one tile matrix of a layer, drawn where the layer has images."""
 
 import logging
+import time
 import urllib.parse
 
 from exceptions import ArgError
 from locust import FastHttpUser, between, events, task
+import requests
 from owslib.wmts import WebMapTileService
 
-from utils.ogc import IMAGE, add_common_args, cached_capabilities, check_response, default_options, user_rng
+from utils.ogc import (
+    IMAGE,
+    add_common_args,
+    add_extent_arg,
+    cached_capabilities,
+    check_response,
+    default_options,
+    intersect,
+    is_geographic,
+    is_metric,
+    mark_empty,
+    parse_extent,
+    user_rng,
+)
+from utils.tiles import digest, draw_tile, find_coverage, probe_level, tile_box, tile_range, to_crs_box, wmts_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +52,7 @@ def init_parser(parser):
         env_var="LOCUST_TILE_MATRIX",
         help="TileMatrix (zoom level) of the TileMatrixSet (default: the middle level of the pyramid)",
     )
+    add_extent_arg(parser)
 
 
 class WMTSBenchmark(FastHttpUser):
@@ -93,27 +110,89 @@ class WMTSBenchmark(FastHttpUser):
         matrix = matrices[self.tile_matrix_value]
         self.layer_width = matrix.matrixwidth  # number of columns
         self.layer_height = matrix.matrixheight  # number of rows
+        self.find_images(opts, list(matrices.values()))
         self.rng = user_rng(self.environment, opts.random_seed)
         logger.info(
             f"layer {self.layer_name}, TileMatrixSet {self.tile_matrix_set}, TileMatrix {self.tile_matrix_value} "
             f"({self.layer_width} x {self.layer_height} tiles), seed {opts.random_seed}"
         )
 
+    def find_images(self, opts, matrices):
+        """
+        Set self.target, self.area and self.coverage: where on the grid the layer has images.
+
+        The area is the TileMatrixSetLimits of the chosen matrix if the layer has them, else its WGS84 bbox
+        narrowed by --extent. A one-off probe (once per process) then fetches the tiles of a coarse level inside
+        it, so the draws land under tiles with an image instead of all over the grid.
+        """
+        crs = self.wmts.tilematrixsets[self.tile_matrix_set].crs
+        if not (is_metric(crs) or is_geographic(crs)):
+            ArgError(
+                f"TileMatrixSet {self.tile_matrix_set}: CRS {crs} is neither in metres nor in degrees"
+            ).handle_error(self.environment)
+        levels = [wmts_matrix(tm, crs) for tm in matrices]
+        self.target = next(m for m in levels if m.id == str(self.tile_matrix_value))
+        limits = self.layer.tilematrixsetlinks[self.tile_matrix_set].tilematrixlimits or {}
+        if self.tile_matrix_value in limits:
+            lim = limits[self.tile_matrix_value]
+            low = tile_box(self.target, lim.mintilecol, lim.maxtilerow)
+            high = tile_box(self.target, lim.maxtilecol, lim.mintilerow)
+            self.area = (low[0], low[1], high[2], high[3])
+        else:
+            wgs84 = tuple(self.layer.boundingBoxWGS84 or (-180.0, -90.0, 180.0, 90.0))[:4]
+            try:
+                extent = parse_extent(opts.extent)
+            except ValueError as e:
+                ArgError(str(e)).handle_error(self.environment)
+            box = intersect(wgs84, extent) if extent else wgs84
+            if box is None:
+                ArgError(f"--extent {opts.extent} does not overlap the layer's WGS84 bbox {wgs84}").handle_error(
+                    self.environment
+                )
+            self.area = to_crs_box(box, crs)
+        if tile_range(self.target, self.area) is None:
+            ArgError(f"The area {self.area} is outside TileMatrix {self.target.id}").handle_error(self.environment)
+
+        level = probe_level(levels, self.target, self.area)
+        key = ("wmts-probe", self.host, self.layer_name, self.tile_matrix_set, self.target.id, self.area)
+        started = time.monotonic()
+        self.coverage, probed_now = cached_capabilities(
+            key, lambda: find_coverage(self.probe_fetch(level), level, self.area)
+        )
+        if probed_now:
+            logger.info(
+                f"probe level {level.id}: {len(self.coverage.tiles)} of {self.coverage.fetched} tiles have images "
+                f"({time.monotonic() - started:.1f} s)"
+            )
+            if not self.coverage.tiles:
+                logger.warning(f"no tile with an image at probe level {level.id}; drawing over the whole area")
+
+    def probe_fetch(self, level):
+        def fetch(col, row):
+            resp = requests.get(self.tile_url(level.id, row, col), timeout=60)
+            return resp.status_code, resp.content
+
+        return fetch
+
+    def tile_url(self, matrix_id, row, col):
+        """The GetTile (KVP) URL of one tile of this layer and TileMatrixSet."""
+        return (
+            f"{self.host}?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={self.layer_name}&STYLE=default"
+            f"&FORMAT={self.layer_mimetype}&TILEMATRIXSET={self.tile_matrix_set}&TILEMATRIX={matrix_id}"
+            f"&TILEROW={row}&TILECOL={col}"
+        )
+
     @task
     def load_tile(self):
-        """A GetTile (KVP) for a random column and row; anything but a 200 image is a failure."""
-        tile_col = self.rng.randint(0, self.layer_width - 1)
-        tile_row = self.rng.randint(0, self.layer_height - 1)
-        url_path = (
-            f"{self.host}?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={self.layer_name}&STYLE=default"
-            f"&FORMAT={self.layer_mimetype}&TILEMATRIXSET={self.tile_matrix_set}&TILEMATRIX={self.tile_matrix_value}"
-            f"&TILEROW={tile_row}&TILECOL={tile_col}"
-        )
+        """A GetTile (KVP) for a random tile where the layer has images; anything but a 200 image is a failure."""
+        tile_col, tile_row = draw_tile(self.rng, self.target, self.area, self.coverage)
+        url_path = self.tile_url(self.tile_matrix_value, tile_row, tile_col)
         with self.client.get(url_path, catch_response=True, name="GetTile") as response:
-            check_response(response, IMAGE)
+            if check_response(response, IMAGE) and self.coverage.blank == digest(response.content or b""):
+                mark_empty(response)
 
 
-# Example: one GetTile against a public PDOK WMTS (first TileMatrixSet, middle TileMatrix)
+# Example: one GetTile against a public PDOK WMTS (first TileMatrixSet, middle TileMatrix, after the probe)
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     from locust.env import Environment

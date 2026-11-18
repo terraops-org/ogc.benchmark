@@ -41,6 +41,7 @@ In a nutshell:
 |`--layer-name`| OGC service layer to be used| --layer-name Ortos2021-RGB | First layer in service found on GetCapabilites XML document|
 |`--tile-matrix-set`| Layer's TileMatrixSet to test (Piramid Tile Type)| --tile-matrix-set "PTTM_06"| Layer's first TileMatrixSet found on GetCapabilities XML document|  
 |`--tile-matrix`| TileMatrixSet's TileMatrix to use (Piramid's zoom/resolution level)| --tile-matrix "07"| Median value (normally 07 or 10)|
+|`--extent`| Area to test, WGS84 lon/lat `minlon,minlat,maxlon,maxlat` | --extent 4.7,52.0,5.2,52.4 | The layer's WGS84 bbox |
 |`--headless`| For locust to run on command line mode | --headless | Default locust is working on webui|
 |`--u` | Number of requests (Number of locust users) | -u 10| No default |
 |`-r` | Increase rate of rquests (Number of locust users)| -r 1| No default|
@@ -48,6 +49,20 @@ In a nutshell:
 |`--loglevel`| Python's log level e.g DEBUG, INFO| --loglevel DEBUG | INFO |
 |`--html`| HTML Filename with test results and graphics| --html wmts.ortos2021.r1.u1.s1640.report.html| No default |
 |`--logfile`| Log file with extra information and requests| --logfile wmts.ortos2021.r1.u1.s1640.log| No default|
+
+**Where the tiles come from.** Tiles are drawn only where the layer has images, not across the whole grid:
+
+1. The area is the layer's TileMatrixSetLimits for the chosen TileMatrix, else its WGS84 bbox, narrowed by
+   `--extent` when given.
+2. At start-up, once per process, a probe fetches every tile of a coarse level inside that area (at most 256
+   tiles; the chosen TileMatrix itself when it is that small) and keeps the ones with an image. Blank tiles are
+   byte-identical, so the most frequent tile body is taken as the blank one. The log says how many probe tiles
+   had images and how long the probe took.
+3. Every request draws a tile at the chosen TileMatrix under one of those image tiles. A drawn tile that is still
+   blank (a coast tile half over the sea) is reported on its own line, `GetTile (empty)`, so the `GetTile` line
+   times real images only.
+
+If the probe finds no image at its level, the log says so and the tiles are drawn over the whole area.
 
 For example a full command would be like this:
 
@@ -124,7 +139,8 @@ uv run locust -f wms.py --headless --host https://example.org/protected/wms -u 5
 
 ### When a run stops by itself
 
-A wrong option (unknown layer, CRS or tile matrix, a bbox area of 0, a password without a user) or a
+A wrong option (unknown layer, CRS or tile matrix, a bbox area of 0, a password without a user, an `--extent`
+outside the layer) or a
 service whose GetCapabilities cannot be read (unreachable host, HTTP 401) stops the run at once with a
 message in the log and **exit code 1**, so scripts and cron jobs see the failure.
 
@@ -136,6 +152,8 @@ Locust 2.47 and Python 3.15, older reports are not comparable with new ones:
 - Locust 2.43.4 changed the HTML report's req/s column from the current rate to the total rate.
 - Locust 2.46 fixed response-time percentiles that were reported too low.
 - Each simulated user now draws from its own random stream, so a seed gives other bboxes than before.
+- `wmts.py` now draws tiles only under the probe's image tiles, so a seed gives other tiles than before, and
+  blank tiles are reported apart as `GetTile (empty)`.
 
 To re-run the old behaviour, check out the tag `v2025.11-locust2.37`.
 

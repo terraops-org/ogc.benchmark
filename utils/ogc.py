@@ -1,7 +1,8 @@
-"""What the three locustfiles share: response checks, CRS facts, option defaults, per-user random streams."""
+"""What the locustfiles share: response checks, CRS facts, shared options, per-user random streams."""
 
 import itertools
 import random
+from base64 import b64encode
 from functools import lru_cache
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -20,14 +21,17 @@ _CAPS = {}  # parsed GetCapabilities per (service, host, ...) key, once per proc
 _CAPS_LOCK = BoundedSemaphore()  # users spawned together wait for the first fetch instead of repeating it
 
 
-def check_response(resp, accept):
-    """Mark a catch_response response as failed unless it is HTTP 200 with an accepted content type.
+def check_response(resp, accept, empty_ok=False):
+    """Mark a catch_response response as failed unless it is HTTP 200 with an accepted content type; True if not failed.
 
     Locust groups failures by their exact message, so every message is a fixed string: never the body
     or the URL (a server that echoes the bbox would otherwise create one error row per request).
+    With empty_ok, a 204 (No Content, an empty tile) is a success; the caller reports it with mark_empty().
     """
     code = resp.status_code
     ctype = (resp.headers or {}).get("content-type", "").lower()
+    if empty_ok and code == 204:
+        return True
     if not code:  # timeout, refused connection, DNS or TLS failure: no HTTP answer, headers None
         resp.failure("Connection error")
     elif code in (502, 503, 504):
@@ -38,6 +42,14 @@ def check_response(resp, accept):
         resp.failure("OGC Exception")
     elif not ctype.startswith(accept):
         resp.failure(f"Invalid content type: {ctype.split(';')[0].strip()}")
+    else:
+        return True
+    return False
+
+
+def mark_empty(resp):
+    """Report a successful response as '<name> (empty)': a blank tile or map, or no features, on a row of its own."""
+    resp.request_meta["name"] = f"{resp.request_meta['name']} (empty)"
 
 
 def _crs(code):
@@ -101,6 +113,103 @@ def add_common_args(parser, bbox=True):
             env_var="LOCUST_BBOX_RATIO",
             help="Bbox width/height ratio (default 1.0, square)",
         )
+
+
+def add_auth_args(parser):
+    """--auth-user / --auth-password: HTTP basic auth for the metadata and every request."""
+    parser.add_argument(
+        "--auth-user",
+        type=str,
+        default="",
+        env_var="LOCUST_AUTH_USER",
+        help="HTTP basic auth user, for GetCapabilities (or the OGC API metadata) and every request (default: none)",
+    )
+    parser.add_argument(
+        "--auth-password",
+        type=str,
+        default="",
+        env_var="LOCUST_AUTH_PASSWORD",
+        include_in_web_ui=False,  # the web UI page would carry its value in clear
+        help="HTTP basic auth password; prefer the env var, the command line is visible in ps",
+    )
+
+
+def auth_header(opts):
+    """{"Authorization": "Basic ..."} for --auth-user / --auth-password, or {} without a user."""
+    if not opts.auth_user:
+        return {}
+    return {"Authorization": "Basic " + b64encode(f"{opts.auth_user}:{opts.auth_password}".encode()).decode()}
+
+
+def add_extent_arg(parser):
+    """--extent: the area to test, in WGS84 lon/lat, narrowing the layer's or collection's own extent."""
+    parser.add_argument(
+        "--extent",
+        type=str,
+        default="",
+        env_var="LOCUST_EXTENT",
+        help="Area to test, WGS84 lon/lat: minlon,minlat,maxlon,maxlat (default: the layer's or collection's extent)",
+    )
+
+
+def parse_extent(text):
+    """'minlon,minlat,maxlon,maxlat' -> a 4-tuple of floats; '' -> None; ValueError for anything else."""
+    if not text:
+        return None
+    try:
+        box = tuple(float(v) for v in text.split(","))
+    except ValueError:
+        raise ValueError(f"--extent must be 4 numbers minlon,minlat,maxlon,maxlat, got '{text}'") from None
+    if len(box) != 4:
+        raise ValueError(f"--extent must be 4 numbers minlon,minlat,maxlon,maxlat, got '{text}'")
+    minx, miny, maxx, maxy = box
+    if minx >= maxx or miny >= maxy:
+        raise ValueError(f"--extent needs min < max for both lon and lat, got '{text}'")
+    if not (-180 <= minx and maxx <= 180 and -90 <= miny and maxy <= 90):
+        raise ValueError(f"--extent must be WGS84 lon/lat (lon -180..180, lat -90..90), got '{text}'")
+    return box
+
+
+def intersect(a, b):
+    """The overlap of two (minx, miny, maxx, maxy) boxes, or None when they share no area."""
+    box = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+    return box if box[0] < box[2] and box[1] < box[3] else None
+
+
+def add_map_args(parser):
+    """The map options wms.py and ogcapi_maps.py share: zoom mix, image size, per-user rate."""
+    parser.add_argument(
+        "--bbox-areas",
+        type=str,
+        default="",
+        env_var="LOCUST_BBOX_AREAS",
+        help="Comma-separated bbox areas in km2, one picked at random per request (zoom mix), e.g. '1,10,100'. "
+        "Overrides --bbox-area.",
+    )
+    parser.add_argument(
+        "--width", type=int, default=512, env_var="LOCUST_WIDTH", help="GetMap width in pixels (default 512)"
+    )
+    parser.add_argument(
+        "--height", type=int, default=512, env_var="LOCUST_HEIGHT", help="GetMap height in pixels (default 512)"
+    )
+    parser.add_argument(
+        "--user-rps",
+        type=float,
+        default=0.0,
+        env_var="LOCUST_USER_RPS",
+        help="Requests per second per user (constant throughput), so total rate = users x this value. "
+        "Default 0 keeps the 1-2 s wait between requests.",
+    )
+
+
+def bbox_areas(opts):
+    """The bbox areas in km2: --bbox-areas parsed, else [--bbox-area]; ValueError for non-numbers."""
+    if not opts.bbox_areas:
+        return [opts.bbox_area]
+    try:
+        return [float(a) for a in opts.bbox_areas.split(",")]
+    except ValueError:
+        raise ValueError(f"--bbox-areas must be km2 numbers, e.g. '1,10,100', got '{opts.bbox_areas}'") from None
 
 
 def with_params(host, params):
