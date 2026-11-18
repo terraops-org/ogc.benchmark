@@ -118,10 +118,34 @@ WFS 1.1.0 and 2.0.0 send the bbox with its CRS (`BBOX=lat,lon,lat,lon,urn:ogc:de
 has no CRS in BBOX, so the corners are sent in the feature type's own SRS. `main.py` lists the feature types of
 a WFS: `uv run python main.py https://.../wfs`.
 
-### Authentication (WMS)
+### OGC API - Tiles options
 
-For a WMS behind HTTP basic auth, `wms.py` sends the credentials with GetCapabilities and with every
-GetMap:
+`ogcapi_tiles.py` requests random vector tiles (Mapbox Vector Tiles) of one tile matrix of a collection, like
+`wmts.py` does for a WMTS layer. Only GET requests are sent.
+
+```bash
+uv run locust -f ogcapi_tiles.py --headless --host https://demo.pygeoapi.io/master --collection lakes --tile-matrix 2 -u 2 -r 1 -t 1m --html tiles-report.html
+```
+
+|Option|Env variable|Description|Default|
+|:-----|:-----------|:----------|:------|
+|`--collection`|`LOCUST_COLLECTION`|Collection with vector tiles|the first collection with vector tiles|
+|`--tile-matrix-set`|`LOCUST_TILE_MATRIX_SET`|Tile matrix set, e.g. `WebMercatorQuad`|the collection's first|
+|`--tile-matrix`|`LOCUST_TILE_MATRIX`|Tile matrix (zoom level)|the middle level (12 for WebMercatorQuad)|
+|`--extent`|`LOCUST_EXTENT`|Area to test, WGS84 lon/lat `minlon,minlat,maxlon,maxlat`|the collection's extent|
+|`--auth-user` / `--auth-password`|`LOCUST_AUTH_USER` / `LOCUST_AUTH_PASSWORD`|HTTP basic auth (see Authentication)|none|
+|`--random-seed`|`LOCUST_RANDOM_SEED`|Seed for the random tiles|1640|
+
+The collections, the tileset and its tile matrix set are read once per process. Tiles are drawn inside the
+tileset's `tileMatrixSetLimits` when it has them, else inside the collection's extent (read as lon/lat)
+narrowed by `--extent`. A 204 or an empty tile (no data there) is reported as `GetTile (empty)`, apart from the
+`GetTile` line. Low zoom levels can be huge when the server builds tiles on request: pick the zoom level you
+want to measure with `--tile-matrix`.
+
+### Authentication (WMS and OGC API)
+
+For a service behind HTTP basic auth, `wms.py` and the OGC API locustfiles send the credentials with the
+metadata requests (GetCapabilities, collections) and with every request:
 
 |Option|Env variable|Description|
 |:-----|:-----------|:----------|
