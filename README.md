@@ -142,6 +142,31 @@ narrowed by `--extent`. A 204 or an empty tile (no data there) is reported as `G
 `GetTile` line. Low zoom levels can be huge when the server builds tiles on request: pick the zoom level you
 want to measure with `--tile-matrix`.
 
+### OGC API - Features options
+
+`ogcapi_features.py` asks for the items of a collection inside random bboxes of its extent, like `wfs.py` does
+with GetFeature. Only GET requests are sent.
+
+```bash
+uv run locust -f ogcapi_features.py --headless --host https://demo.pygeoapi.io/master --collection dutch_windmills -u 2 -r 1 -t 1m --html features-report.html
+```
+
+|Option|Env variable|Description|Default|
+|:-----|:-----------|:----------|:------|
+|`--collection`|`LOCUST_COLLECTION`|Collection with items|the first collection with items|
+|`--bbox-area` / `--bbox-ratio`|`LOCUST_BBOX_AREA` / `LOCUST_BBOX_RATIO`|Bbox area in km2 and width/height ratio|100 / 1.0|
+|`--crs`|`LOCUST_CRS`|CRS of the bbox and of the answer, e.g. `EPSG:3763`; must be in the collection's `crs` list|CRS84|
+|`--limit`|`LOCUST_LIMIT`|Features per request (servers may cap it)|100|
+|`--extent`|`LOCUST_EXTENT`|Area to test, WGS84 lon/lat `minlon,minlat,maxlon,maxlat`|the collection's extent|
+|`--auth-user` / `--auth-password`|`LOCUST_AUTH_USER` / `LOCUST_AUTH_PASSWORD`|HTTP basic auth (see Authentication)|none|
+|`--random-seed`|`LOCUST_RANDOM_SEED`|Seed for the random bboxes|1640|
+
+Without `--crs` the bbox is CRS84 lon/lat and no `bbox-crs` is sent. With `--crs`, `bbox-crs` and `crs` are sent
+as OGC URIs and the bbox follows the CRS's axis order (latitude first for EPSG:4326), as OGC API - Features
+Part 2 requires. The collection's extent is read as lon/lat; when it is missing or not lon/lat, `--extent` alone
+bounds the test. An answer with no features is reported as `GetFeature (empty)`. Paging (`next` links) is not
+followed: each request is one page of up to `--limit` features.
+
 ### Authentication (WMS and OGC API)
 
 For a service behind HTTP basic auth, `wms.py` and the OGC API locustfiles send the credentials with the

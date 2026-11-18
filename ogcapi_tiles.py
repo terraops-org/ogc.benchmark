@@ -17,12 +17,10 @@ from utils.ogc import (  # noqa: E402
     auth_header,
     check_response,
     default_options,
-    intersect,
     mark_empty,
-    parse_extent,
     user_rng,
 )
-from utils.ogcapi import MVT, cached_json, collections, link, lonlat_extent, pick_collection  # noqa: E402
+from utils.ogcapi import MVT, cached_json, collections, link, lonlat_area, pick_collection  # noqa: E402
 from utils.tiles import tile_range, tms_matrix, to_crs_box  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -119,16 +117,7 @@ class OGCAPITilesBenchmark(FastHttpUser):
             lim = limits[self.target.id]
             self.range = (lim["minTileCol"], lim["maxTileCol"], lim["minTileRow"], lim["maxTileRow"])
             return
-        extent = parse_extent(opts.extent)
-        try:
-            own = lonlat_extent(col)
-        except ValueError:
-            if not extent:
-                raise
-            own = extent  # the server's extent is unusable: --extent alone bounds the test
-        box = intersect(own, extent) if extent else own
-        if box is None:
-            raise ValueError(f"--extent {opts.extent} does not overlap the extent {own} of '{self.collection}'")
+        box = lonlat_area(col, opts.extent)
         self.range = tile_range(self.target, to_crs_box(box, crs))
         if self.range is None:
             raise ValueError(f"The extent {box} is outside tile matrix {self.target.id} of {self.tile_matrix_set}")

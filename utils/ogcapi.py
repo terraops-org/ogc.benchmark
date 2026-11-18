@@ -2,7 +2,7 @@
 
 import requests
 
-from utils.ogc import cached_capabilities, with_params
+from utils.ogc import cached_capabilities, intersect, parse_extent, with_params
 
 CRS84 = "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 MVT = ("application/vnd.mapbox-vector-tile",)
@@ -64,4 +64,23 @@ def lonlat_extent(col):
     minx, miny, maxx, maxy = box
     if not (-180 <= minx < maxx <= 180 and -90 <= miny < maxy <= 90):
         raise ValueError(f"Collection '{col.get('id')}': extent {box} is not lon/lat; use --extent")
+    return box
+
+
+def lonlat_area(col, extent_text):
+    """
+    The lon/lat area to test: the collection's extent narrowed by --extent (ValueError if they don't overlap).
+
+    When the collection's extent is missing or not lon/lat, --extent alone bounds the test.
+    """
+    extent = parse_extent(extent_text)
+    try:
+        own = lonlat_extent(col)
+    except ValueError:
+        if not extent:
+            raise
+        return extent
+    box = intersect(own, extent) if extent else own
+    if box is None:
+        raise ValueError(f"--extent {extent_text} does not overlap the extent {own} of '{col.get('id')}'")
     return box

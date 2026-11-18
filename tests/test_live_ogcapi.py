@@ -5,6 +5,7 @@ Skipped only when the demo cannot be reached; any other problem fails the test (
 
 import pytest
 
+import ogcapi_features
 import ogcapi_tiles
 from tests.test_live_services import make_user, start_or_skip
 
@@ -23,3 +24,14 @@ def test_ogcapi_tile_request():
     ((name, status, exception, _),) = seen
     assert (name, status) in {("GetTile", 200), ("GetTile (empty)", 200), ("GetTile (empty)", 204)}
     assert exception is None
+
+
+def test_ogcapi_features_request():
+    """One real items request (Dutch windmills, 100 km2 bbox in CRS84): features or none, never a failure."""
+    user, seen = make_user(
+        ogcapi_features, ogcapi_features.OGCAPIFeaturesBenchmark, DEMO, "--collection", "dutch_windmills"
+    )
+    start_or_skip(user)
+    user.load_features()
+    ((name, status, exception, _),) = seen
+    assert name in ("GetFeature", "GetFeature (empty)") and (status, exception) == (200, None)

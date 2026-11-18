@@ -6,7 +6,16 @@ import pytest
 
 from utils import ogc
 from utils.ogc import is_metric, is_yx
-from utils.ogcapi import CRS84, cached_json, collections, crs_uri, link, lonlat_extent, pick_collection
+from utils.ogcapi import (
+    CRS84,
+    cached_json,
+    collections,
+    crs_uri,
+    link,
+    lonlat_area,
+    lonlat_extent,
+    pick_collection,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -85,3 +94,14 @@ def test_pyproj_reads_ogc_uris():
     assert not is_yx(CRS84)
     assert is_yx(crs_uri("EPSG:4326"))
     assert is_metric(crs_uri("EPSG:3857"))
+
+
+def test_lonlat_area():
+    assert lonlat_area(COL, "") == (-9.68, 36.77, -6.17, 42.15)
+    assert lonlat_area(COL, "-10,38,-9,39") == (-9.68, 38.0, -9.0, 39.0)
+    with pytest.raises(ValueError, match="does not overlap"):
+        lonlat_area(COL, "100,10,101,11")
+    broken = {"id": "b"}
+    assert lonlat_area(broken, "-10,38,-9,39") == (-10.0, 38.0, -9.0, 39.0)  # --extent alone bounds the test
+    with pytest.raises(ValueError, match="'b'"):
+        lonlat_area(broken, "")
