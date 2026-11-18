@@ -167,6 +167,33 @@ Part 2 requires. The collection's extent is read as lon/lat; when it is missing 
 bounds the test. An answer with no features is reported as `GetFeature (empty)`. Paging (`next` links) is not
 followed: each request is one page of up to `--limit` features.
 
+### OGC API - Maps options
+
+`ogcapi_maps.py` asks for map images (PNG) of random bboxes inside a collection's extent, like `wms.py` does
+with GetMap. Only GET requests are sent.
+
+```bash
+uv run locust -f ogcapi_maps.py --headless --host https://demo.pygeoapi.io/master --collection mapserver_world_map --bbox-areas 1,10,100 -u 2 -r 1 -t 1m --html maps-report.html
+```
+
+|Option|Env variable|Description|Default|
+|:-----|:-----------|:----------|:------|
+|`--collection`|`LOCUST_COLLECTION`|Collection with a map|the first collection with a map|
+|`--bbox-area`|`LOCUST_BBOX_AREA`|Bbox area in km2|100|
+|`--bbox-areas`|`LOCUST_BBOX_AREAS`|Bbox areas in km2, one picked at random per request (zoom mix, overrides `--bbox-area`)|not set|
+|`--bbox-ratio`|`LOCUST_BBOX_RATIO`|Bbox width/height ratio|1.0|
+|`--crs`|`LOCUST_CRS`|CRS of the bbox and the map, in metres or degrees, e.g. `EPSG:3857`|CRS84|
+|`--width` / `--height`|`LOCUST_WIDTH` / `LOCUST_HEIGHT`|Map size in pixels|512|
+|`--user-rps`|`LOCUST_USER_RPS`|Requests per second per user (constant throughput)|0 (wait 1-2 s)|
+|`--extent`|`LOCUST_EXTENT`|Area to test, WGS84 lon/lat `minlon,minlat,maxlon,maxlat`|the collection's extent|
+|`--auth-user` / `--auth-password`|`LOCUST_AUTH_USER` / `LOCUST_AUTH_PASSWORD`|HTTP basic auth (see Authentication)|none|
+|`--random-seed`|`LOCUST_RANDOM_SEED`|Seed for the random bboxes|1640|
+
+Without `--crs` the bbox is CRS84 lon/lat and no `bbox-crs` is sent. With `--crs`, `bbox-crs` and `crs` are sent
+as OGC URIs and the bbox follows the CRS's axis order (latitude first for EPSG:4326); a server that reads
+EPSG:4326 as lon/lat then returns blank maps. At start-up, once per process, one map is requested just outside
+the extent: a later map with exactly the same bytes is blank and is reported as `GetMap <collection> (empty)`.
+
 ### Authentication (WMS and OGC API)
 
 For a service behind HTTP basic auth, `wms.py` and the OGC API locustfiles send the credentials with the

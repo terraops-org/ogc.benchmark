@@ -6,6 +6,7 @@ Skipped only when the demo cannot be reached; any other problem fails the test (
 import pytest
 
 import ogcapi_features
+import ogcapi_maps
 import ogcapi_tiles
 from tests.test_live_services import make_user, start_or_skip
 
@@ -35,3 +36,13 @@ def test_ogcapi_features_request():
     user.load_features()
     ((name, status, exception, _),) = seen
     assert name in ("GetFeature", "GetFeature (empty)") and (status, exception) == (200, None)
+
+
+def test_ogcapi_map_request():
+    """One real map (world map, 100 km2 bbox in CRS84): an image or a blank one, never a failure."""
+    user, seen = make_user(ogcapi_maps, ogcapi_maps.OGCAPIMapsBenchmark, DEMO, "--collection", "mapserver_world_map")
+    start_or_skip(user)
+    user.load_map()
+    ((name, status, exception, _),) = seen
+    assert name in ("GetMap mapserver_world_map", "GetMap mapserver_world_map (empty)")
+    assert (status, exception) == (200, None)
